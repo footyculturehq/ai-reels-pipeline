@@ -1,0 +1,50 @@
+name: Post to Instagram
+
+on:
+  # 8am, 2pm, 8pm UTC every day
+  schedule:
+    - cron: '0 8,14,20 * * *'
+  # Allow manual trigger from the Actions tab
+  workflow_dispatch:
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # needed to commit posted_stories.json back
+
+    steps:
+      # ── 1. Checkout ────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Fetch full history so git push doesn't fail on empty repos
+          fetch-depth: 0
+
+      # ── 2. Python ──────────────────────────────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # ── 3. Dependencies ────────────────────────────────────────────────────
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4 Pillow
+
+      # ── 4. Run pipeline ────────────────────────────────────────────────────
+      - name: Run pipeline
+        env:
+          ZAPIER_WEBHOOK_URL: ${{ secrets.ZAPIER_WEBHOOK_URL }}
+          GOOGLE_API_KEY:     ${{ secrets.GOOGLE_API_KEY }}
+          PEXELS_API_KEY:     ${{ secrets.PEXELS_API_KEY }}
+        run: python posts/pipeline.py
+
+      # ── 5. Commit posted_stories.json so we never re-post ──────────────────
+      - name: Commit posted_stories.json
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add posts/posted_stories.json
+          # Only commit if the file actually changed
+          git diff --cached --quiet || git commit -m "chore: update posted_stories.json [skip ci]"
+          git push

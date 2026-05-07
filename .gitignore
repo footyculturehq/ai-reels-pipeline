@@ -1,0 +1,27 @@
+# Node
+node_modules/
+npm-debug.log*
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.env
+venv/
+.venv/
+
+# Build outputs
+out/
+*.mp4
+*.mov
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Raw footage / large binaries
+raw-footage/
+gfpgan/
+
+# Temp output images (keep only the tracker)
+posts/output/
