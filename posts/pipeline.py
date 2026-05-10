@@ -9,9 +9,14 @@ Flow:
   3. Pick the freshest unposted story
   4. Find a portrait image via Google Custom Search, fallback to Pexels
   5. Generate a 1080×1440 post card using create_post.py
-  6. Upload image to catbox.moe (anonymous, no account needed)
-  7. POST {image_url, caption} to Zapier → Instagram
-  8. Append story to posted_stories.json and commit (done by GitHub Actions)
+  6. Post the image directly to Instagram via instagrapi
+  7. Append story to posted_stories.json and commit (done by GitHub Actions)
+
+Required GitHub Secrets:
+  INSTAGRAM_USERNAME  — e.g. footyculturehq
+  INSTAGRAM_PASSWORD  — Instagram account password
+  GOOGLE_API_KEY      — Google Custom Search API key
+  PEXELS_API_KEY      — Pexels API key
 """
 
 import io
@@ -44,7 +49,9 @@ GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
 GOOGLE_CX = "017576662512468239146:omuauf_lfve"
 PEXELS_API_KEY = os.environ.get("PEXELS_API_KEY", "")
 
-CATBOX_UPLOAD_URL = "https://catbox.moe/user/api.php"
+INSTAGRAM_USERNAME = os.environ.get("INSTAGRAM_USERNAME", "")
+INSTAGRAM_PASSWORD = os.environ.get("INSTAGRAM_PASSWORD", "")
+INSTAGRAM_SESSION_FILE = SCRIPT_DIR / "instagram_session.json"
 
 # Request headers — look like a real browser to avoid 403s
 HEADERS = {
@@ -549,48 +556,75 @@ def generate_post_image(
 
 
 # ---------------------------------------------------------------------------
-# 7. Upload to catbox.moe
+# 7. Post to Instagram via instagrapi
 # ---------------------------------------------------------------------------
 
-def upload_to_catbox(image_path: str) -> "str | None":
+def post_to_instagram(image_path: str, caption: str) -> bool:
     """
-    Upload a local PNG to catbox.moe (anonymous).
-    Returns the public URL string or None on failure.
+    Post image directly to Instagram using instagrapi.
+    Uses a session file for persistence to avoid repeated logins.
+    Returns True on success.
     """
-    log.info("Uploading to catbox.moe …")
+    if not INSTAGRAM_USERNAME or not INSTAGRAM_PASSWORD:
+        log.error("INSTAGRAM_USERNAME or INSTAGRAM_PASSWORD not set in environment.")
+        return False
+
     try:
-        with open(image_path, "rb") as fh:
-            resp = requests.post(
-                CATBOX_UPLOAD_URL,
-                data={"reqtype": "fileupload", "userhash": ""},
-                files={"fileToUpload": (Path(image_path).name, fh, "image/png")},
-                timeout=60,
-            )
-        resp.raise_for_status()
-        url = resp.text.strip()
-        if url.startswith("https://"):
-            log.info("Catbox URL: %s", url)
-            return url
-        log.error("Unexpected catbox.moe response: %r", url)
-        return None
-    except Exception as exc:
-        log.error("catbox.moe upload failed: %s", exc)
-        return None
+        from instagrapi import Client  # noqa: PLC0415
+        from instagrapi.exceptions import LoginRequired  # noqa: PLC0415
+    except ImportError:
+        log.error("instagrapi is not installed. Add it to requirements.")
+        return False
 
+    cl = Client()
+    # Mimic a real device to reduce bot-detection risk
+    cl.set_locale("en_US")
+    cl.set_timezone_offset(0)
 
-# ---------------------------------------------------------------------------
-# 8. Post to Instagram via Zapier
-# ---------------------------------------------------------------------------
+    # Try loading existing session first
+    session_loaded = False
+    if INSTAGRAM_SESSION_FILE.exists():
+        try:
+            cl.load_settings(str(INSTAGRAM_SESSION_FILE))
+            cl.login(INSTAGRAM_USERNAME, INSTAGRAM_PASSWORD)
+            cl.get_timeline_feed()  # test the session is alive
+            session_loaded = True
+            log.info("Reused existing Instagram session.")
+        except (LoginRequired, Exception) as exc:
+            log.warning("Existing session invalid (%s), re-logging in.", exc)
+            cl = Client()
+            cl.set_locale("en_US")
+            cl.set_timezone_offset(0)
+            session_loaded = False
 
-def send_to_zapier(image_url: str, caption: str) -> bool:
-    """Returns True on HTTP 2xx."""
+    if not session_loaded:
+        log.info("Logging into Instagram as @%s …", INSTAGRAM_USERNAME)
+        try:
+            cl.login(INSTAGRAM_USERNAME, INSTAGRAM_PASSWORD)
+            log.info("Login successful.")
+        except Exception as exc:
+            log.error("Instagram login failed: %s", exc)
+            return False
+
+    # Save updated session for next run
     try:
-        from zapier_post import post_to_instagram  # noqa: PLC0415
-        status = post_to_instagram(image_url, caption)
-        log.info("Zapier response: HTTP %d", status)
-        return 200 <= status < 300
+        cl.dump_settings(str(INSTAGRAM_SESSION_FILE))
+        log.info("Session saved to %s", INSTAGRAM_SESSION_FILE)
     except Exception as exc:
-        log.error("Zapier post failed: %s", exc)
+        log.warning("Could not save session: %s", exc)
+
+    # Upload the post
+    log.info("Uploading photo to Instagram …")
+    try:
+        media = cl.photo_upload(
+            path=image_path,
+            caption=caption,
+        )
+        log.info("Posted! Media ID: %s  URL: https://www.instagram.com/p/%s/",
+                 media.pk, media.code)
+        return True
+    except Exception as exc:
+        log.error("Instagram photo upload failed: %s", exc, exc_info=True)
         return False
 
 
@@ -663,19 +697,13 @@ def main() -> None:
 
     log.info("Post image: %s", post_path)
 
-    # ── Upload to catbox.moe ──────────────────────────────────────────────────
-    public_url = upload_to_catbox(post_path)
-    if not public_url:
-        log.error("Upload failed. Aborting.")
-        return
-
-    # ── Post to Instagram via Zapier ─────────────────────────────────────────
-    if not os.environ.get("ZAPIER_WEBHOOK_URL"):
-        log.warning("ZAPIER_WEBHOOK_URL not set — skipping Instagram post.")
+    # ── Post to Instagram directly ────────────────────────────────────────────
+    if not INSTAGRAM_USERNAME or not INSTAGRAM_PASSWORD:
+        log.warning("INSTAGRAM_USERNAME/PASSWORD not set — skipping Instagram post.")
     else:
-        success = send_to_zapier(public_url, caption)
+        success = post_to_instagram(post_path, caption)
         if not success:
-            log.error("Zapier POST failed. Not marking story as posted.")
+            log.error("Instagram post failed. Not marking story as posted.")
             return
 
     # ── Record success ────────────────────────────────────────────────────────
@@ -684,7 +712,6 @@ def main() -> None:
         "title": story["title"],
         "url": story["url"],
         "posted_at": datetime.now(tz=timezone.utc).isoformat(),
-        "image_url": public_url,
         "tag": tag,
     })
     _save_posted(posted)

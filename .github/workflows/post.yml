@@ -11,14 +11,13 @@ jobs:
   post:
     runs-on: ubuntu-latest
     permissions:
-      contents: write   # needed to commit posted_stories.json back
+      contents: write   # needed to commit session + posted_stories.json back
 
     steps:
       # ── 1. Checkout ────────────────────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          # Fetch full history so git push doesn't fail on empty repos
           fetch-depth: 0
 
       # ── 2. Python ──────────────────────────────────────────────────────────
@@ -29,22 +28,23 @@ jobs:
 
       # ── 3. Dependencies ────────────────────────────────────────────────────
       - name: Install dependencies
-        run: pip install requests beautifulsoup4 Pillow
+        run: pip install requests beautifulsoup4 Pillow instagrapi
 
       # ── 4. Run pipeline ────────────────────────────────────────────────────
       - name: Run pipeline
         env:
-          ZAPIER_WEBHOOK_URL: ${{ secrets.ZAPIER_WEBHOOK_URL }}
+          INSTAGRAM_USERNAME: ${{ secrets.INSTAGRAM_USERNAME }}
+          INSTAGRAM_PASSWORD: ${{ secrets.INSTAGRAM_PASSWORD }}
           GOOGLE_API_KEY:     ${{ secrets.GOOGLE_API_KEY }}
           PEXELS_API_KEY:     ${{ secrets.PEXELS_API_KEY }}
         run: python posts/pipeline.py
 
-      # ── 5. Commit posted_stories.json so we never re-post ──────────────────
-      - name: Commit posted_stories.json
+      # ── 5. Commit tracking files so we never re-post ───────────────────────
+      - name: Commit tracking files
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add posts/posted_stories.json
-          # Only commit if the file actually changed
-          git diff --cached --quiet || git commit -m "chore: update posted_stories.json [skip ci]"
+          git add posts/posted_stories.json posts/instagram_session.json || true
+          # Only commit if files actually changed
+          git diff --cached --quiet || git commit -m "chore: update tracking files [skip ci]"
           git push
