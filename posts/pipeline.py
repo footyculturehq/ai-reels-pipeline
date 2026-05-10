@@ -581,8 +581,17 @@ def generate_post_image(
 def post_to_instagram(image_path: str, caption: str) -> bool:
     """
     Post image directly to Instagram using instagrapi.
-    Uses a session file for persistence to avoid repeated logins.
-    Returns True on success.
+
+    Strategy:
+      - If instagram_session.json exists (generated locally via generate_session.py),
+        load those cookies WITHOUT re-logging in from the GitHub Actions IP.
+        GitHub/Azure IPs are blacklisted by Instagram for fresh logins, but
+        existing authenticated sessions/cookies work fine from any IP.
+      - If no session file, attempt a fresh login (will only work from a
+        residential IP, i.e. when run locally).
+
+    To set up: run `python posts/generate_session.py` once on your local
+    machine, then commit posts/instagram_session.json to the repo.
     """
     if not INSTAGRAM_USERNAME or not INSTAGRAM_PASSWORD:
         log.error("INSTAGRAM_USERNAME or INSTAGRAM_PASSWORD not set in environment.")
@@ -590,42 +599,53 @@ def post_to_instagram(image_path: str, caption: str) -> bool:
 
     try:
         from instagrapi import Client  # noqa: PLC0415
-        from instagrapi.exceptions import LoginRequired  # noqa: PLC0415
+        from instagrapi.exceptions import LoginRequired, PleaseWaitFewMinutes  # noqa: PLC0415
     except ImportError:
         log.error("instagrapi is not installed. Add it to requirements.")
         return False
 
-    cl = Client()
-    # Mimic a real device to reduce bot-detection risk
-    cl.set_locale("en_US")
-    cl.set_timezone_offset(0)
+    def _fresh_client() -> "Client":
+        c = Client()
+        c.set_locale("en_US")
+        c.set_timezone_offset(0)
+        return c
 
-    # Try loading existing session first
+    cl = _fresh_client()
     session_loaded = False
+
     if INSTAGRAM_SESSION_FILE.exists():
+        # ── Session-only path (GitHub Actions) ───────────────────────────────
+        # Load persisted cookies; do NOT call cl.login() — that triggers a new
+        # authentication request which Instagram rejects from data-centre IPs.
+        log.info("Loading Instagram session from %s", INSTAGRAM_SESSION_FILE)
         try:
             cl.load_settings(str(INSTAGRAM_SESSION_FILE))
-            cl.login(INSTAGRAM_USERNAME, INSTAGRAM_PASSWORD)
-            cl.get_timeline_feed()  # test the session is alive
+            # Reuse the stored cookies by setting account ID via username
+            cl.get_timeline_feed()   # lightweight test — raises if session dead
             session_loaded = True
-            log.info("Reused existing Instagram session.")
-        except (LoginRequired, Exception) as exc:
-            log.warning("Existing session invalid (%s), re-logging in.", exc)
-            cl = Client()
-            cl.set_locale("en_US")
-            cl.set_timezone_offset(0)
-            session_loaded = False
+            log.info("Session is valid — skipping re-login.")
+        except Exception as exc:
+            log.warning("Stored session is invalid (%s). Will attempt fresh login.", exc)
+            cl = _fresh_client()
+    else:
+        log.info("No session file found — will attempt fresh login (needs residential IP).")
 
     if not session_loaded:
+        # ── Fresh-login path (local machine only) ────────────────────────────
         log.info("Logging into Instagram as @%s …", INSTAGRAM_USERNAME)
         try:
             cl.login(INSTAGRAM_USERNAME, INSTAGRAM_PASSWORD)
             log.info("Login successful.")
         except Exception as exc:
             log.error("Instagram login failed: %s", exc)
+            log.error(
+                "If running on GitHub Actions, generate a session first: "
+                "run `python posts/generate_session.py` locally, then commit "
+                "posts/instagram_session.json to the repo."
+            )
             return False
 
-    # Save updated session for next run
+    # Persist updated session for next run
     try:
         cl.dump_settings(str(INSTAGRAM_SESSION_FILE))
         log.info("Session saved to %s", INSTAGRAM_SESSION_FILE)
