@@ -112,6 +112,15 @@ def scrape_stories(max_age_days: int = MAX_AGE_DAYS) -> list[dict]:
     """
     Returns a list of dicts sorted newest-first:
       {id, title, url, date, age_days}
+
+    footyheadlines.com uses .post-feed__item containers.  Each item has:
+      <a class="post-feed__item-link" href="/YYYY/MM/slug.html">
+        <h2 class="post-feed__item-headline">Title Here</h2>
+      </a>
+    No date element in the HTML — date is parsed from the URL path.
+    Because we only have YYYY/MM precision we treat every story as published
+    on the 1st of that month at midnight UTC for age-filtering purposes.
+    Stories whose URL has no parseable date are assumed to be recent (today).
     """
     log.info("Scraping %s …", FOOTY_HEADLINES_URL)
     try:
@@ -125,54 +134,64 @@ def scrape_stories(max_age_days: int = MAX_AGE_DAYS) -> list[dict]:
     now = datetime.now(tz=timezone.utc)
     stories: list[dict] = []
 
-    # footyheadlines.com uses <article> or <div class="post"> blocks.
-    # Each block has an <a> with the headline and optionally a <time> or date
-    # in a <span class="meta-date"> / <span class="date"> element.
-    # We try multiple selectors for robustness.
-    candidates = soup.select("article") or soup.select(".post")
+    # Primary: .post-feed__item  (current site structure as of 2025)
+    candidates = soup.select(".post-feed__item")
+
+    # Fallback to legacy selectors in case the site is ever restructured
+    if not candidates:
+        candidates = soup.select("article") or soup.select(".post")
+
+    log.info("Candidate blocks found: %d", len(candidates))
 
     for block in candidates:
-        # ── Title & URL ──────────────────────────────────────────────────────
-        link_tag = block.find("a", href=True)
+        # ── Link & Title ─────────────────────────────────────────────────────
+        link_tag = block.select_one("a.post-feed__item-link") or block.find("a", href=True)
         if not link_tag:
             continue
-        title = link_tag.get_text(separator=" ", strip=True)
-        if not title or len(title) < 10:
-            # try <h2> or <h3> inside the block
+
+        href = link_tag.get("href", "")
+        if not href:
+            continue
+        if not href.startswith("http"):
+            href = FOOTY_HEADLINES_URL.rstrip("/") + "/" + href.lstrip("/")
+
+        # Prefer the dedicated headline element; fall back to any hX or link text
+        headline_tag = block.select_one("h2.post-feed__item-headline")
+        if headline_tag:
+            title = headline_tag.get_text(separator=" ", strip=True)
+        else:
+            title = ""
             for hx in block.find_all(["h2", "h3", "h4"]):
                 t = hx.get_text(separator=" ", strip=True)
                 if len(t) >= 10:
                     title = t
                     break
-        href = link_tag["href"]
-        if not href.startswith("http"):
-            href = FOOTY_HEADLINES_URL.rstrip("/") + "/" + href.lstrip("/")
+            if not title:
+                title = link_tag.get_text(separator=" ", strip=True)
 
-        # ── Date ─────────────────────────────────────────────────────────────
+        if not title or len(title) < 10:
+            continue
+
+        # ── Date — parsed from URL path /YYYY/MM/slug.html ───────────────────
         story_date: datetime | None = None
 
-        # Strategy A: <time datetime="…">
-        time_tag = block.find("time")
-        if time_tag and time_tag.get("datetime"):
+        url_date_m = re.search(r"/(\d{4})/(\d{2})/", href)
+        if url_date_m:
             try:
-                raw = time_tag["datetime"][:19]  # "2025-04-30T14:00:00"
-                story_date = datetime.fromisoformat(raw).replace(tzinfo=timezone.utc)
+                y, mo = int(url_date_m.group(1)), int(url_date_m.group(2))
+                story_date = datetime(y, mo, 1, tzinfo=timezone.utc)
             except Exception:
                 pass
 
-        # Strategy B: visible date text in known class names
+        # Also try any <time datetime="…"> inside the block (future-proofing)
         if story_date is None:
-            for cls in ("meta-date", "date", "post-date", "entry-date", "published"):
-                span = block.find(class_=cls)
-                if span:
-                    raw_text = span.get_text(strip=True)
-                    story_date = _parse_date_text(raw_text, now)
-                    if story_date:
-                        break
-
-        # Strategy C: any text that looks like "Apr 30, 2025" or "30 Apr 2025"
-        if story_date is None:
-            story_date = _parse_date_text(block.get_text(" ", strip=True), now)
+            time_tag = block.find("time")
+            if time_tag and time_tag.get("datetime"):
+                try:
+                    raw = time_tag["datetime"][:19]
+                    story_date = datetime.fromisoformat(raw).replace(tzinfo=timezone.utc)
+                except Exception:
+                    pass
 
         # If we still have no date, assume it's recent (today) to not miss content
         if story_date is None:
