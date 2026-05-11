@@ -1,16 +1,19 @@
 """
 Footy Culture HQ — Automated Instagram Posting Pipeline
 --------------------------------------------------------
-Runs 3x/day via GitHub Actions (8am, 2pm, 8pm UTC).
+Runs 2x/day via GitHub Actions (noon and 7pm UTC).
 
 Flow:
-  1. Scrape footyheadlines.com for boot/kit news ≤ 3 days old
-  2. Skip stories already in posted_stories.json
-  3. Pick the freshest unposted story
-  4. Find a portrait image via Google Custom Search, fallback to Pexels
-  5. Generate a 1080×1440 post card using create_post.py
-  6. Post the image directly to Instagram via instagrapi
-  7. Append story to posted_stories.json and commit (done by GitHub Actions)
+  1. Scrape footyheadlines.com, Nitter, and RSS feeds for boot/kit news ≤ 3 days old
+  2. Skip stories already in posted_stories.json; enforce max 2 posts/24h
+  3. Score stories 0-10 — only post if score ≥ 7 (big clubs, big players, hot models)
+  4. Inject hype word into headline (LEAKED:, INSANE., CLEAN., etc.)
+  5. Find ONE best image: article renders → tweet/RSS image → Pexels
+  6. Generate a single 1080×1350 magazine-cover card using create_post.py
+  7. Post to Instagram via instagrapi; append to posted_stories.json
+
+CLI flags:
+  --dry-run   Generate card locally but skip Instagram upload
 
 Required GitHub Secrets:
   INSTAGRAM_USERNAME  — e.g. footyculturehq
@@ -583,203 +586,272 @@ def _month_num(name: str) -> int:
 
 
 # ---------------------------------------------------------------------------
-# 2. Choose tag based on story content
+# 2. Category detection + scoring + headline tools
 # ---------------------------------------------------------------------------
-_TAG_KEYWORDS: list[tuple[str, list[str]]] = [
-    # LEAKED: rumours and unreleased early sightings
-    ("LEAKED",   ["leaked", "leak", "unreleased", "prototype", "sample", "rumoured",
-                  "rumored", "rumour", "rumor", "exclusive", "first look", "first-look",
-                  "player edition", "pe boot", "unboxing"]),
-    # SPOTTED: athlete seen wearing boots/kit before official reveal
-    ("SPOTTED",  ["spotted", "training", "training ground", "warm-up", "warmup",
-                  "warm up", "match worn", "game worn", "worn by", "wearing",
-                  "on feet", "on pitch"]),
-    # BREAKING: official confirmations and announcements
-    ("BREAKING", ["breaking", "confirmed", "official", "announced"]),
-    # DROPPED: product launches and release-day posts
-    ("DROPPED",  ["release", "drop", "launch", "on sale", "available now", "buy now",
-                  "dropping", "coming soon"]),
-    ("NEWS",     []),  # default
-]
+
+def pick_category(title: str) -> str:
+    """
+    Map story title to a display category for the card badge.
+    Returns one of: KIT DROP / BOOT LAUNCH / SIGNING / COLLAB / VAULT /
+                    LEAKED / SPOTTED / FOOTBALL
+    """
+    t = title.lower()
+    if any(w in t for w in ["collab", "collaboration", " x ", "x nike", "x adidas"]):
+        return "COLLAB"
+    if any(w in t for w in ["retro", "vault", "reissue", "og ", "classic", "archive"]):
+        return "VAULT"
+    if any(w in t for w in ["signing", "joins", "signed", "transfer", "deal", "contract"]):
+        return "SIGNING"
+    if any(w in t for w in ["boot launch", "boot drop", "new boot", "new cleat",
+                             "released", "available", "on sale", "buy now"]):
+        return "BOOT LAUNCH"
+    if any(w in t for w in ["boot", "boots", "cleat", "cleats"]):
+        if any(w in t for w in ["leaked", "leak", "spotted", "training", "worn"]):
+            return "LEAKED"
+        return "BOOT LAUNCH"
+    if any(w in t for w in ["kit reveal", "kit launch", "kit drop", "new kit",
+                             "home kit", "away kit", "third kit"]):
+        return "KIT DROP"
+    if any(w in t for w in ["kit", "jersey", "shirt", "strip"]):
+        if any(w in t for w in ["leaked", "leak"]):
+            return "LEAKED"
+        return "KIT DROP"
+    if any(w in t for w in ["spotted", "training", "warm-up", "warmup", "match worn",
+                             "worn by", "wearing", "on feet"]):
+        return "SPOTTED"
+    if any(w in t for w in ["leaked", "leak", "unreleased", "prototype", "rumoured"]):
+        return "LEAKED"
+    return "FOOTBALL"
 
 
+# Legacy alias used in scoring logic
 def pick_tag(title: str) -> str:
-    tl = title.lower()
-    for tag, keywords in _TAG_KEYWORDS:
-        if any(kw in tl for kw in keywords):
-            return tag
-    return "NEWS"
+    return pick_category(title)
+
+
+def score_story(story: dict) -> tuple[int, str]:
+    """
+    Score a story 0–10 for post worthiness.
+
+    Tier 1 (8-10): auto-post — big club/player, full reveal, boot launch, collab
+    Tier 2 (5-7):  queue/skip — leaks without clean image, smaller clubs
+    Tier 3 (0-4):  skip — date teasers, anthem jackets, niche products, low-res
+
+    Returns (score, reason_string).
+    """
+    t = story["title"].lower()
+    score = 4   # baseline — below threshold; must earn its way up
+
+    reasons: list[str] = []
+
+    # ── Big players — guaranteed engagement ───────────────────────────────────
+    big_players = [
+        "mbappe", "haaland", "salah", "ronaldo", "messi", "bellingham",
+        "vinicius", "saka", "kane", "de bruyne", "pedri", "yamal",
+        "rashford", "neymar", "lewandowski", "son", "martinelli",
+        "pulisic", "foden", "grealish", "mount", "odegaard",
+    ]
+    if any(p in t for p in big_players):
+        score += 3
+        reasons.append("big player")
+
+    # ── Big clubs — mass fanbase ───────────────────────────────────────────────
+    big_clubs = [
+        "manchester united", "man utd", "arsenal", "liverpool", "chelsea",
+        "manchester city", "man city", "tottenham", "spurs",
+        "real madrid", "barcelona", "psg", "paris saint-germain",
+        "bayern", "juventus", "ac milan", "inter milan", "dortmund",
+        "atletico madrid", "napoli",
+        "brazil", "england", "france", "germany", "argentina",
+        "portugal", "spain", "italy",
+    ]
+    if any(c in t for c in big_clubs):
+        score += 2
+        reasons.append("big club")
+
+    # ── Popular boot models ────────────────────────────────────────────────────
+    hot_models = [
+        "mercurial", "predator", "phantom", "tiempo", "superfly",
+        "copa", "future", "ultra", "king", "tekela", "furon",
+        "f50", "x speedflow", "speedportal",
+    ]
+    if any(m in t for m in hot_models):
+        score += 2
+        reasons.append("hot boot model")
+
+    # ── Content quality signals ────────────────────────────────────────────────
+    if any(w in t for w in ["collab", "collaboration"]):
+        score += 2; reasons.append("collab")
+    if any(w in t for w in ["retro", "vault", "reissue", "og ", "classic"]):
+        score += 2; reasons.append("retro/vault")
+    if any(w in t for w in ["launch", "official", "confirmed", "released", "on sale"]):
+        score += 1; reasons.append("official")
+    if any(w in t for w in ["leaked", "leak"]):
+        score += 1; reasons.append("leak")
+
+    # ── TIER 3 HARD PENALTIES — things nobody cares about ─────────────────────
+    niche_items = [
+        "anthem jacket", "anthem track", "anthem top", "anthem vest",
+        "woven jacket", "rain jacket", "tracksuit",
+        "training shirt", "training top", "training jacket",
+        "pre-match",
+    ]
+    if any(n in t for n in niche_items):
+        score -= 4; reasons.append("niche product −4")
+
+    if re.search(r"(coming|teased|dropping)\s+(may|june|july|aug|\d)", t):
+        score -= 3; reasons.append("date tease only −3")
+
+    if "teased" in t and not any(w in t for w in ["leaked", "spotted"]):
+        score -= 2; reasons.append("tease not reveal −2")
+
+    obscure_clubs = [
+        "palermo", "galatasaray", "lyon", "burnley", "nottingham",
+        "brentford", "fulham", "wolves", "brighton", "luton",
+        "lecce", "sassuolo", "elche", "valladolid",
+    ]
+    if any(c in t for c in obscure_clubs):
+        score -= 2; reasons.append("obscure club −2")
+
+    if "away kit info" in t:
+        score -= 2; reasons.append("info not reveal −2")
+    if "overview" in t or "roundup" in t:
+        score -= 2; reasons.append("roundup −2")
+
+    score = max(0, min(10, score))
+    return score, " | ".join(reasons) if reasons else "baseline"
 
 
 # ---------------------------------------------------------------------------
-# 3. Format headline for the template
+# 3. Format headline + hype-word injector
 # ---------------------------------------------------------------------------
 
 def format_headline(title: str) -> str:
-    """
-    Clean up the raw article title for the visual template.
-    - Strip site name suffix (e.g. "— Footy Headlines")
-    - Capitalise properly
-    - Trim to a sensible length for the card
-    """
-    # Remove site suffix patterns
+    """Clean up the raw article title for the card."""
     title = re.sub(r"\s*[|—–-]\s*(footy headlines?|footyheadlines\.com).*$",
                    "", title, flags=re.IGNORECASE).strip()
-    # Sentence-case (keep existing caps for brand names)
-    if title and title[0].islower():
-        title = title[0].upper() + title[1:]
-    # Hard cap at 80 chars so it fits on the card
-    if len(title) > 80:
-        title = title[:77].rsplit(" ", 1)[0] + "…"
-    return title
+    # Strip year ranges from display headline (26-27 looks odd at 120px)
+    title = re.sub(r'\b20\d{2}[-–]\d{2,4}\b', '', title)
+    title = re.sub(r'\b\d{2}-\d{2}\b', '', title)
+    title = re.sub(r'\s+', ' ', title).strip()
+    if len(title) > 72:
+        title = title[:70].rsplit(" ", 1)[0] + "…"
+    return title.strip()
 
 
-# ---------------------------------------------------------------------------
-# 4. Build Instagram caption
-# ---------------------------------------------------------------------------
-
-# Emoji and opening line templates per tag type
-_CAPTION_TEMPLATES: dict[str, list[str]] = {
-    "LEAKED": [
-        "👀 {title}.",
-        "🔓 {title}.",
-        "🚨 {title}.",
-    ],
-    "SPOTTED": [
-        "🔍 {title}.",
-        "👟 {title}.",
-        "📸 {title}.",
-    ],
-    "BREAKING": [
-        "🚨 {title}.",
-        "⚡ {title}.",
-        "📢 {title}.",
-    ],
-    "DROPPED": [
-        "🔥 {title}.",
-        "💥 {title}.",
-        "👟 {title}.",
-    ],
-    "NEWS": [
-        "⚽ {title}.",
-        "🗞️ {title}.",
-        "📰 {title}.",
-    ],
-}
-
-_FOLLOW_LINES: dict[str, str] = {
-    "LEAKED":   "Early intel only lands here first — follow @footyculturehq 👇",
-    "SPOTTED":  "Caught before the official reveal. Follow @footyculturehq for daily boot spotting 👇",
-    "BREAKING": "Stay ahead of the game — follow @footyculturehq for the fastest boot & kit news 👇",
-    "DROPPED":  "Don't sleep — follow @footyculturehq so you never miss a drop 👇",
-    "NEWS":     "Follow @footyculturehq for daily football boot & kit news 👇",
+_HYPE_WORDS = {
+    "LEAKED":       ["LEAKED:", "FIRST LOOK:", "EXCLUSIVE:"],
+    "SPOTTED":      ["SPOTTED:", "CAUGHT:", "SEEN:"],
+    "KIT DROP":     ["CLEAN.", "INSANE.", "NEW:"],
+    "BOOT LAUNCH":  ["STRIKING.", "NEW:", "INSANE."],
+    "SIGNING":      ["BREAKING:", "OFFICIAL:", "CONFIRMED:"],
+    "COLLAB":       ["INSANE.", "MASSIVE:", "CLEAN."],
+    "VAULT":        ["CLEAN.", "CLASSIC.", "VAULT:"],
+    "FOOTBALL":     ["NEW:", "BREAKING:", "LATEST:"],
 }
 
 
-def build_caption(title: str, tag: str) -> str:
+def inject_hype(headline: str, category: str) -> str:
     """
-    Build a proper Instagram caption with:
-      - An emoji-led opening sentence based on the story title
-      - A short context line relevant to the tag (leaked / spotted / breaking / etc.)
-      - A follow CTA
-      - Relevant hashtags on a separate line
+    Prepend a contextually appropriate hype word to the headline.
+    Picks deterministically based on title hash so reruns are stable.
     """
-    import hashlib  # for stable template selection without randomness
+    import hashlib
+    options = _HYPE_WORDS.get(category, _HYPE_WORDS["FOOTBALL"])
+    idx = int(hashlib.md5(headline.encode()).hexdigest(), 16) % len(options)
+    return f"{options[idx]} {headline}"
 
-    title_l = title.lower()
 
-    # ── Opening sentence ─────────────────────────────────────────────────────
-    templates = _CAPTION_TEMPLATES.get(tag, _CAPTION_TEMPLATES["NEWS"])
-    # Pick deterministically from title hash so same story always gets same emoji
-    idx = int(hashlib.md5(title.encode()).hexdigest(), 16) % len(templates)
-    opening = templates[idx].format(title=title)
+# ---------------------------------------------------------------------------
+# 4. Build Instagram caption (spec format)
+# ---------------------------------------------------------------------------
 
-    # ── Context line based on tag ─────────────────────────────────────────────
+def build_caption(title: str, category: str) -> str:
+    """
+    Format per spec:
+      Line 1: Headline
+      Line 2: blank
+      Line 3: 1–2 sentence context
+      Line 4: blank
+      Line 5: CTA
+      Line 6: blank
+      Line 7: Hashtags (max 8)
+    """
+    import hashlib
+
+    t = title.lower()
+
+    # ── Line 1: headline ─────────────────────────────────────────────────────
+    headline_line = title
+
+    # ── Line 3: 1-2 sentence context ─────────────────────────────────────────
     context_map = {
-        "LEAKED":   "Leaked colourway / unreleased design hitting the internet before the brand is ready for it. 👀",
-        "SPOTTED":  "Spotted on feet before any official announcement — this is what the boots community lives for.",
-        "BREAKING": "This one's official — straight from the source.",
-        "DROPPED":  "It's here. No more waiting.",
-        "NEWS":     "The latest from the world of football boots and kits.",
+        "LEAKED":       "Leaked before the brand is ready to announce — hit the link in bio for the full story.",
+        "SPOTTED":      "Caught on feet before the official reveal. The leaks always come here first.",
+        "KIT DROP":     "The new kit is official. Full details and release info at the link in bio.",
+        "BOOT LAUNCH":  "New colourway just hit. Check the link in bio for pricing and release date.",
+        "SIGNING":      "The deal is done. More details at the link in bio.",
+        "COLLAB":       "The collab is real and it looks insane. Full details in bio.",
+        "VAULT":        "The classic is back. Retro lovers, this one's for you.",
+        "FOOTBALL":     "Full story at the link in bio. Follow for daily kit and boot news.",
     }
-    context = context_map.get(tag, context_map["NEWS"])
+    context = context_map.get(category, context_map["FOOTBALL"])
 
-    # ── CTA ──────────────────────────────────────────────────────────────────
-    cta = _FOLLOW_LINES.get(tag, _FOLLOW_LINES["NEWS"])
+    # ── Line 5: CTA ───────────────────────────────────────────────────────────
+    cta = "🔔 Drop alerts → link in bio"
 
-    # ── Hashtags ──────────────────────────────────────────────────────────────
-    hashtags: list[str] = []
+    # ── Line 7: Hashtags (max 8, relevant only) ───────────────────────────────
+    hashtags: list[str] = ["#footballculture", "#footballboots"]
 
-    # Brand
-    brand_map = {
-        "nike":         "#Nike #NikeFootball",
-        "adidas":       "#Adidas #adidasFootball",
-        "puma":         "#Puma #PumaFootball",
-        "new balance":  "#NewBalance #NBFootball",
-        "mizuno":       "#Mizuno",
-        "umbro":        "#Umbro",
-        "under armour": "#UnderArmour",
-        "castore":      "#Castore",
-        "hummel":       "#Hummel",
+    brand_tags = {
+        "nike":        "#nike #nikefootball",
+        "adidas":      "#adidas #adidasfootball",
+        "puma":        "#puma #pumafootball",
+        "new balance": "#newbalance",
+        "umbro":       "#umbro",
+        "under armour":"#underarmour",
+        "castore":     "#castore",
     }
-    for brand, ht in brand_map.items():
-        if brand in title_l:
+    for brand, ht in brand_tags.items():
+        if brand in t:
             hashtags.extend(ht.split())
             break
 
-    # Product type
-    if any(w in title_l for w in ["boot", "cleat", "boots", "cleats"]):
-        hashtags += ["#FootballBoots", "#Boots"]
-    elif any(w in title_l for w in ["kit", "jersey", "shirt", "strip"]):
-        hashtags += ["#FootballKit", "#NewKit"]
+    if any(w in t for w in ["kit", "jersey", "shirt"]):
+        hashtags.append("#kitdrops")
+        hashtags.append("#soccerkits")
+    elif any(w in t for w in ["boot", "cleat"]):
+        hashtags.append("#footballboots")
 
-    # Specific boot models
-    model_tags = {
-        "mercurial":  "#Mercurial",
-        "predator":   "#Predator",
-        "phantom":    "#Phantom",
-        "tiempo":     "#Tiempo",
-        "superfly":   "#Superfly",
-        "copa":       "#Copa",
-        "future":     "#PumaFuture",
-        "ultra":      "#PumaUltra",
-        "king":       "#PumaKing",
-        "tekela":     "#NewBalanceTekela",
-        "furon":      "#NewBalanceFuron",
-        "f50":        "#AdidasF50",
-        "x speedflow":"#XSpeedflow",
-        "speedportal":"#Speedportal",
+    club_tags = {
+        "arsenal": "#arsenal", "liverpool": "#liverpool",
+        "chelsea": "#chelsea", "manchester united": "#manutd",
+        "manchester city": "#mancity", "real madrid": "#realmadrid",
+        "barcelona": "#fcbarcelona", "psg": "#psg",
+        "juventus": "#juventus", "bayern": "#fcbayern",
     }
-    for model, ht in model_tags.items():
-        if model in title_l:
+    for club, ht in club_tags.items():
+        if club in t:
             hashtags.append(ht)
             break
 
-    # Tag-type hashtag
-    tag_ht = {
-        "LEAKED":   "#FootballLeaks #BootLeaks",
-        "SPOTTED":  "#BootSpotted #SpottedOnFeet",
-        "BREAKING": "#BreakingNews #FootballNews",
-        "DROPPED":  "#JustDropped #NewRelease",
-        "NEWS":     "#FootballNews",
-    }
-    hashtags.extend(tag_ht.get(tag, "#Football").split())
+    hashtags.append("#footyculturehq")
 
-    # Always
-    hashtags += ["#FootyCultureHQ", "#FootballCulture"]
+    # Deduplicate, cap at 8
+    seen_ht: set[str] = set()
+    clean_tags: list[str] = []
+    for h in hashtags:
+        if h not in seen_ht:
+            seen_ht.add(h)
+            clean_tags.append(h)
+    tag_block = " ".join(clean_tags[:8])
 
-    # Deduplicate preserving order
-    seen: set[str] = set()
-    unique_tags: list[str] = []
-    for t in hashtags:
-        if t not in seen:
-            seen.add(t)
-            unique_tags.append(t)
-
-    # Cap at 20 hashtags (Instagram allows 30 but 20 looks clean)
-    tag_block = " ".join(unique_tags[:20])
-
-    return f"{opening}\n\n{context}\n\n{cta}\n\n.\n.\n.\n{tag_block}"
+    return (
+        f"{headline_line}\n\n"
+        f"{context}\n\n"
+        f"{cta}\n\n"
+        f"{tag_block}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1082,73 +1154,54 @@ def find_image(title: str, preferred_url: "str | None" = None) -> "bytes | None"
 
 
 # ---------------------------------------------------------------------------
-# 6. Generate post image
+# 6. Generate post image (single card — no carousel)
 # ---------------------------------------------------------------------------
 
-def generate_carousel(
+def generate_post_image(
     headline: str,
-    tag: str,
-    image_bytes_list: "list[bytes]",
-) -> "list[str]":
+    category: str,
+    image_bytes: "bytes | None",
+) -> "str | None":
     """
-    Generate a carousel of 2–4 post card images.
-
-    Slide 1  — full branded card: tag badge + headline + handle
-    Slide 2+ — secondary cards: different background, just handle + strip
-                (lets the photos speak — different angle/shot of the same item)
-
-    Returns list of file paths (at least 1, up to len(image_bytes_list)).
+    Generate a single magazine-cover post card using create_post.py.
+    Returns the file path, or None on failure.
     """
     sys.path.insert(0, str(SCRIPT_DIR))
     try:
         from create_post import create_post  # noqa: PLC0415
     except Exception as exc:
         log.error("Could not import create_post: %s", exc)
-        return []
+        return None
 
-    if not image_bytes_list:
-        # No images — generate one card with a dark placeholder
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        out = str(OUTPUT_DIR / f"post_{ts}_s1.png")
-        try:
-            create_post(headline=headline, tag=tag, size="portrait",
-                        output_path=out, slide_num=1)
-            return [out]
-        except Exception as exc:
-            log.error("Placeholder card failed: %s", exc)
-            return []
-
-    paths: list[str] = []
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    tmp_bg: "str | None" = None
 
-    for i, img_bytes in enumerate(image_bytes_list, start=1):
-        # Save image bytes to a temp file
-        tmp_path = str(OUTPUT_DIR / f"_tmp_bg_{ts}_{i}.jpg")
-        with open(tmp_path, "wb") as f:
-            f.write(img_bytes)
+    if image_bytes:
+        tmp_bg = str(OUTPUT_DIR / f"_tmp_bg_{ts}.jpg")
+        with open(tmp_bg, "wb") as f:
+            f.write(image_bytes)
 
-        out_path = str(OUTPUT_DIR / f"post_{ts}_s{i}.png")
-        try:
-            create_post(
-                headline=headline,
-                tag=tag,
-                image_path=tmp_path,
-                size="portrait",
-                output_path=out_path,
-                focal_point="center",
-                slide_num=i,           # 1 = full card, 2+ = minimal
-            )
-            paths.append(out_path)
-            log.info("Generated slide %d: %s", i, out_path)
-        except Exception as exc:
-            log.error("Slide %d generation failed: %s", i, exc, exc_info=True)
-        finally:
+    out_path = str(OUTPUT_DIR / f"post_{ts}.png")
+    try:
+        create_post(
+            headline=headline,
+            category=category,
+            image_path=tmp_bg,
+            size="portrait",
+            output_path=out_path,
+            focal_point="center",
+        )
+        log.info("Generated post card: %s", out_path)
+        return out_path
+    except Exception as exc:
+        log.error("Post card generation failed: %s", exc, exc_info=True)
+        return None
+    finally:
+        if tmp_bg:
             try:
-                os.unlink(tmp_path)
+                os.unlink(tmp_bg)
             except Exception:
                 pass
-
-    return paths
 
 
 # ---------------------------------------------------------------------------
@@ -1322,20 +1375,60 @@ def post_to_instagram(image_paths: "list[str] | str", caption: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Max posts per day guard
+# ---------------------------------------------------------------------------
+
+MAX_POSTS_PER_DAY = 2
+
+def _posts_today(posted: list[dict]) -> int:
+    """Count how many posts were made in the last 24 hours."""
+    cutoff = datetime.now(tz=timezone.utc) - timedelta(hours=24)
+    count = 0
+    for p in posted:
+        try:
+            ts_str = p.get("posted_at", "")
+            ts = datetime.fromisoformat(ts_str)
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            if ts >= cutoff:
+                count += 1
+        except Exception:
+            pass
+    return count
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    log.info("=== Footy Culture HQ pipeline starting ===")
+    import argparse
+    parser = argparse.ArgumentParser(description="Footy Culture HQ Instagram pipeline")
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Generate the card locally but do NOT post to Instagram.",
+    )
+    args = parser.parse_args()
+    dry_run: bool = args.dry_run
+
+    log.info("=== Footy Culture HQ pipeline starting%s ===",
+             " [DRY RUN]" if dry_run else "")
 
     # ── Load history ─────────────────────────────────────────────────────────
     posted = _load_posted()
     log.info("Stories already posted: %d", len(posted))
 
+    # ── Max posts per day guard ───────────────────────────────────────────────
+    today_count = _posts_today(posted)
+    log.info("Posts in last 24h: %d / %d max", today_count, MAX_POSTS_PER_DAY)
+    if not dry_run and today_count >= MAX_POSTS_PER_DAY:
+        log.info("Daily post limit reached (%d). Exiting.", MAX_POSTS_PER_DAY)
+        return
+
     # ── Scrape all sources ────────────────────────────────────────────────────
-    fh_stories   = scrape_stories()
+    fh_stories     = scrape_stories()
     nitter_stories = scrape_nitter()
-    rss_stories  = scrape_rss_feeds()
+    rss_stories    = scrape_rss_feeds()
 
     all_stories = fh_stories + nitter_stories + rss_stories
     log.info(
@@ -1357,160 +1450,92 @@ def main() -> None:
             unique.append(s)
     log.info("Unique stories after dedup: %d", len(unique))
 
-    # ── Score stories by mass appeal ─────────────────────────────────────────
-    def _relevance_score(s: dict) -> int:
-        """
-        Higher = post this first.
-        Only post things mass audiences care about — big clubs, big players,
-        popular boots. Penalise niche products nobody outside enthusiasts knows.
-        """
-        t = s["title"].lower()
-        score = 0
-
-        # ── Big clubs (massive global fanbases) ───────────────────────────────
-        big_clubs = [
-            "manchester united", "man utd", "arsenal", "liverpool", "chelsea",
-            "manchester city", "man city", "tottenham", "spurs",
-            "real madrid", "barcelona", "psg", "paris saint-germain",
-            "bayern", "juventus", "ac milan", "inter milan", "dortmund",
-            "atletico", "napoli", "brazil", "england", "france", "germany",
-            "argentina", "portugal", "spain",
-        ]
-        if any(c in t for c in big_clubs):
-            score += 25
-
-        # ── Big players (guaranteed engagement) ───────────────────────────────
-        big_names = [
-            "mbappe", "haaland", "salah", "ronaldo", "messi", "bellingham",
-            "vinicius", "saka", "kane", "de bruyne", "pedri", "yamal",
-            "rashford", "neymar", "lewandowski", "son", "martinelli",
-        ]
-        if any(n in t for n in big_names):
-            score += 30
-
-        # ── Popular boot models (boot fans know these by name) ────────────────
-        hot_models = [
-            "mercurial", "predator", "phantom", "tiempo", "superfly",
-            "copa", "future", "ultra", "king", "tekela", "furon",
-            "f50", "x speedflow", "speedportal",
-        ]
-        if any(m in t for m in hot_models):
-            score += 20
-
-        # ── Content type — boots first, then kits ────────────────────────────
-        if any(w in t for w in ["boot", "boots", "cleat", "cleats"]):
-            score += 20
-        elif any(w in t for w in ["kit", "jersey", "shirt", "strip"]):
-            score += 8   # kits are OK but boots come first
-
-        # ── Tag type — leaked/spotted is more exciting ────────────────────────
-        tag = pick_tag(s["title"])
-        tag_scores = {"LEAKED": 15, "SPOTTED": 20, "BREAKING": 15, "DROPPED": 10, "NEWS": 0}
-        score += tag_scores.get(tag, 0)
-
-        # ── HEAVY PENALTIES for niche / low-interest content ─────────────────
-        # Nobody outside kit collectors cares about these
-        niche_terms = [
-            "anthem jacket", "anthem track", "anthem top",
-            "pre-match", "training shirt", "training top", "training jacket",
-            "tracksuit", "rain jacket", "woven jacket",
-            "away kit info",        # secondary kit info posts (not reveals)
-            "overview",             # roundup posts
-            "world cup kit overview",
-        ]
-        if any(n in t for n in niche_terms):
-            score -= 35
-
-        # Obscure/smaller clubs that won't get engagement
-        obscure_clubs = [
-            "palermo", "galatasaray", "lyon", "monaco", "burnley",
-            "nottingham", "leicester", "brentford", "fulham", "wolves",
-        ]
-        if any(c in t for c in obscure_clubs):
-            score -= 20
-
-        return score
-
-    # Sort: freshest first, then by relevance within same age
-    unposted = [s for s in unique if s["id"] not in {p.get("id") for p in posted}]
-    unposted.sort(key=lambda s: (s["age_days"], -_relevance_score(s)))
-
-    for s in unique:  # log all candidates so we can see what's available
-        tag_preview = pick_tag(s["title"])
-        log.info(
-            "  [score=%+d age=%d tag=%-8s] %s",
-            _relevance_score(s), s["age_days"], tag_preview, s["title"][:70],
-        )
-
-    # ── Pick best unposted story ──────────────────────────────────────────────
+    # ── Score + filter ────────────────────────────────────────────────────────
     posted_ids = {p.get("id") for p in posted}
-    story: "dict | None" = None
-    for s in unposted:
-        if s["id"] not in posted_ids:
-            story = s
-            break
+    candidates: list[dict] = []
+    for s in unique:
+        if s["id"] in posted_ids:
+            continue
+        score, reason = score_story(s)
+        cat = pick_category(s["title"])
+        log.info("  [score=%d/10 age=%d cat=%-12s] %s  (%s)",
+                 score, s["age_days"], cat, s["title"][:65], reason)
+        if score >= 7:
+            candidates.append({**s, "_score": score})
+        else:
+            log.info("    → SKIPPED (score %d < 7)", score)
 
-    if story is None:
-        log.info("All recent stories have already been posted. Nothing to do.")
+    # Sort: highest score first; break ties by freshness
+    candidates.sort(key=lambda s: (-s["_score"], s["age_days"]))
+
+    if not candidates:
+        log.info("No stories scored ≥7. Nothing to post this run.")
         return
 
+    story = candidates[0]
     log.info(
-        "Selected story: %r  source=%s  age=%d days",
+        "Selected story (score=%d): %r  source=%s  age=%d days",
+        story["_score"],
         story["title"],
         story.get("source", "FootyHeadlines"),
         story["age_days"],
     )
 
-    # ── Prepare content ──────────────────────────────────────────────────────
-    tag = pick_tag(story["title"])
-    headline = format_headline(story["title"])
-    caption = build_caption(story["title"], tag)
+    # ── Prepare content ───────────────────────────────────────────────────────
+    category = pick_category(story["title"])
+    raw_headline = format_headline(story["title"])
+    hype_headline = inject_hype(raw_headline, category)
+    caption = build_caption(story["title"], category)
 
-    log.info("Tag: %s | Headline: %r", tag, headline)
-    log.info("Caption: %s", caption)
+    log.info("Category: %s", category)
+    log.info("Headline (hype): %r", hype_headline)
+    log.info("Caption:\n%s", caption)
 
-    # ── Find images (3 for carousel) ─────────────────────────────────────────
-    # Priority: scrape actual article renders (exact product) →
-    #           tweet/RSS attached image → Pexels search (fact-checked query)
+    # ── Find ONE best image ───────────────────────────────────────────────────
     preferred_img_url: "str | None" = story.get("tweet_image")
     images_bytes = find_images(
         story["title"],
         preferred_url=preferred_img_url,
-        article_url=story.get("url"),  # scrape footyheadlines article for real renders
-        n=3,
+        article_url=story.get("url"),
+        n=1,
     )
+    image_bytes: "bytes | None" = images_bytes[0] if images_bytes else None
 
-    if not images_bytes:
-        log.warning("No images found — will generate cards with dark placeholder.")
+    if not image_bytes:
+        log.warning("No image found — will generate card with dark placeholder background.")
 
-    # ── Generate carousel (2-3 slides) ───────────────────────────────────────
-    slide_paths = generate_carousel(headline, tag, images_bytes)
+    # ── Generate single post card ─────────────────────────────────────────────
+    card_path = generate_post_image(hype_headline, category, image_bytes)
 
-    if not slide_paths:
+    if not card_path:
         log.error("Card generation failed. Aborting.")
         return
 
-    log.info("Generated %d slide(s): %s", len(slide_paths), slide_paths)
+    log.info("Card ready: %s", card_path)
 
-    # ── Post to Instagram ─────────────────────────────────────────────────────
-    if not INSTAGRAM_USERNAME or not INSTAGRAM_PASSWORD:
+    # ── Post to Instagram (or skip if dry-run) ────────────────────────────────
+    if dry_run:
+        log.info("[DRY RUN] Skipping Instagram post. Card saved at: %s", card_path)
+    elif not INSTAGRAM_USERNAME or not INSTAGRAM_PASSWORD:
         log.warning("INSTAGRAM_USERNAME/PASSWORD not set — skipping Instagram post.")
     else:
-        success = post_to_instagram(slide_paths, caption)
+        success = post_to_instagram(card_path, caption)
         if not success:
             log.error("Instagram post failed. Not marking story as posted.")
             return
 
     # ── Record success ────────────────────────────────────────────────────────
-    posted.append({
-        "id": story["id"],
-        "title": story["title"],
-        "url": story["url"],
-        "posted_at": datetime.now(tz=timezone.utc).isoformat(),
-        "tag": tag,
-    })
-    _save_posted(posted)
-    log.info("Marked %r as posted. Total posted: %d", story["id"], len(posted))
+    if not dry_run:
+        posted.append({
+            "id": story["id"],
+            "title": story["title"],
+            "url": story["url"],
+            "posted_at": datetime.now(tz=timezone.utc).isoformat(),
+            "tag": category,
+        })
+        _save_posted(posted)
+        log.info("Marked %r as posted. Total posted: %d", story["id"], len(posted))
+
     log.info("=== Pipeline complete ===")
 
 

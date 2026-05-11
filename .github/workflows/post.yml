@@ -1,9 +1,9 @@
 name: Post to Instagram
 
 on:
-  # 8am, 2pm, 8pm UTC every day
+  # noon and 7pm UTC every day (≈ 8am / 3pm ET) — max 2 posts/day
   schedule:
-    - cron: '0 8,14,20 * * *'
+    - cron: '0 12,19 * * *'
   # Allow manual trigger from the Actions tab
   workflow_dispatch:
 
