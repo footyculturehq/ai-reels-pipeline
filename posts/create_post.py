@@ -56,13 +56,37 @@ AUTO_GREEN = {
     "premier league", "champions league", "world cup", "euro",
 }
 
-TAG_COLOURS = {
-    "LEAKED":   ((255, 50,  50),  WHITE),   # red bg, white text
-    "SPOTTED":  (ACID_GREEN,      PITCH_BLACK),
-    "BREAKING": ((255, 50,  50),  WHITE),
-    "DROPPED":  (ACID_GREEN,      PITCH_BLACK),
-    "NEWS":     (WHITE,           PITCH_BLACK),
-}
+
+# ---------------------------------------------------------------------------
+# Boot icon
+# ---------------------------------------------------------------------------
+
+def _draw_boot_icon(draw, x, y, width=130, color=ACID_GREEN, lw=5):
+    """
+    Draw an iconic football boot outline (right-facing).
+    Collar on the left rises sharply ABOVE the flat vamp — reads as a boot.
+    """
+    s = width / 100.0
+    pts = [
+        (x + int(0*s),   y + int(38*s)),
+        (x + int(0*s),   y + int(8*s)),
+        (x + int(13*s),  y + int(0*s)),   # collar peak
+        (x + int(32*s),  y + int(18*s)),
+        (x + int(62*s),  y + int(20*s)),
+        (x + int(82*s),  y + int(22*s)),
+        (x + int(100*s), y + int(40*s)),  # toe tip
+        (x + int(92*s),  y + int(60*s)),
+        (x + int(72*s),  y + int(66*s)),
+        (x + int(8*s),   y + int(66*s)),
+        (x + int(0*s),   y + int(58*s)),
+        (x + int(0*s),   y + int(38*s)),
+    ]
+    draw.line(pts, fill=color, width=lw)
+    sole_y = y + int(66*s)
+    for sx_norm in [18, 42, 65]:
+        cx = x + int(sx_norm * s)
+        r  = max(4, int(5 * s))
+        draw.ellipse([(cx-r, sole_y+2), (cx+r, sole_y+2+r*2)], fill=color)
 
 
 # ---------------------------------------------------------------------------
@@ -206,14 +230,18 @@ def create_post(
 
     draw = ImageDraw.Draw(canvas)
 
-    strip_h = 6
-    pad_x   = 48
+    strip_h   = 6
+    pad_x     = 48
+    boot_w    = 96   # boot icon width
 
-    # ── SLIDE 2+ (secondary) — just background + handle + strip ──────────────
+    # ── SLIDE 2+ (secondary) — background + boot icon + handle + strip ───────
     if slide_num > 1:
         hf = _font(38, "Bold")
-        draw.text((pad_x, H - strip_h - 20 - _th(draw, HANDLE, hf)),
-                  HANDLE, font=hf, fill=ACID_GREEN)
+        handle_y2 = H - strip_h - 20 - _th(draw, HANDLE, hf)
+        draw.text((pad_x, handle_y2), HANDLE, font=hf, fill=ACID_GREEN)
+        # Boot icon top-right
+        _draw_boot_icon(draw, x=W - pad_x - boot_w, y=38, width=boot_w,
+                        color=ACID_GREEN, lw=5)
         draw.rectangle([(0, H - strip_h), (W, H)], fill=ACID_GREEN)
         result = canvas.convert("RGB")
         if not output_path:
@@ -226,18 +254,19 @@ def create_post(
     # ── MAIN SLIDE (slide 1) — full text layout ───────────────────────────────
     max_tw    = W - pad_x * 2
     hl_font   = _font(72, "ExtraBold")
-    tag_font  = _font(34, "Bold")
+    fn_font   = _font(34, "Bold")        # FOOTY NEWS label
     sub_font  = _font(36, "Regular")
     hf        = _font(38, "Bold")
 
-    # ── TAG BADGE ─────────────────────────────────────────────────────────────
-    tag_bg, tag_fg = TAG_COLOURS.get(tag, TAG_COLOURS["NEWS"])
-    tag_text  = tag
-    tag_pad_x, tag_pad_y = 18, 10
-    tag_tw    = _tw(draw, tag_text, tag_font)
-    tag_th    = _th(draw, tag_text, tag_font)
-    tag_box_w = tag_tw + tag_pad_x * 2
-    tag_box_h = tag_th + tag_pad_y * 2
+    # ── FOOTY NEWS badge (white box, black text — same as original) ───────────
+    fn_text    = "FOOTY NEWS"
+    fn_bb      = draw.textbbox((0, 0), fn_text, font=fn_font)
+    fn_tw      = fn_bb[2] - fn_bb[0]
+    fn_th      = fn_bb[3] - fn_bb[1]
+    fn_top_off = fn_bb[1]
+    fn_pad_x, fn_pad_y = 16, 10
+    fn_box_w   = fn_tw + fn_pad_x * 2
+    fn_box_h   = fn_th + fn_pad_y * 2
 
     # ── PRE-MEASURE HEADLINE ──────────────────────────────────────────────────
     tokens   = _parse(headline)
@@ -291,19 +320,21 @@ def create_post(
     handle_y    = H - strip_h - 55 - handle_h
     sub_start_y = handle_y - gap3 - sub_h
     hl_start_y  = sub_start_y - gap2 - hl_block_h
-    tag_y       = hl_start_y - gap1 - tag_box_h
+    fn_y        = hl_start_y - gap1 - fn_box_h
 
-    # ── DRAW TAG BADGE ────────────────────────────────────────────────────────
-    draw.rounded_rectangle(
-        [(pad_x, tag_y), (pad_x + tag_box_w, tag_y + tag_box_h)],
-        radius=6,
-        fill=tag_bg,
+    # ── DRAW FOOTY NEWS BADGE (white box, black text) ─────────────────────────
+    draw.rectangle(
+        [(pad_x, fn_y), (pad_x + fn_box_w, fn_y + fn_box_h)],
+        fill=WHITE,
     )
-    bb = draw.textbbox((0, 0), tag_text, font=tag_font)
     draw.text(
-        (pad_x + tag_pad_x - bb[0], tag_y + tag_pad_y - bb[1]),
-        tag_text, font=tag_font, fill=tag_fg,
+        (pad_x + fn_pad_x - fn_bb[0], fn_y + fn_pad_y - fn_top_off),
+        fn_text, font=fn_font, fill=PITCH_BLACK,
     )
+
+    # ── BOOT ICON — top-right ─────────────────────────────────────────────────
+    _draw_boot_icon(draw, x=W - pad_x - boot_w, y=38, width=boot_w,
+                    color=ACID_GREEN, lw=5)
 
     # ── DRAW HEADLINE ─────────────────────────────────────────────────────────
     cur_y = hl_start_y

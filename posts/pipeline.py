@@ -865,6 +865,61 @@ def search_google_image(query: str) -> "bytes | None":
 # 5b. Pexels fallback
 # ---------------------------------------------------------------------------
 
+def scrape_article_images(url: str, max_images: int = 4) -> "list[bytes]":
+    """
+    Fetch the actual article page and pull out product images.
+    Returns up to max_images image bytes lists — these are the REAL leaked
+    renders/photos for the story, not generic Pexels stock.
+    """
+    if "footyheadlines.com" not in url:
+        return []
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=20)
+        resp.raise_for_status()
+    except Exception as exc:
+        log.debug("Article fetch failed for %s: %s", url, exc)
+        return []
+
+    soup = BeautifulSoup(resp.text, "html.parser")
+    found_urls: list[str] = []
+
+    # og:image is always the hero image — get it first
+    og = soup.find("meta", property="og:image")
+    if og and og.get("content"):
+        found_urls.append(og["content"])
+
+    # All <img> inside the article body
+    article_body = (
+        soup.select_one(".post-content")
+        or soup.select_one("article")
+        or soup.select_one(".entry-content")
+        or soup.find("main")
+    )
+    if article_body:
+        for img_tag in article_body.find_all("img", src=True):
+            src = img_tag["src"]
+            # Skip tiny icons, logos, ads
+            if any(skip in src for skip in ["logo", "icon", "avatar", "banner", "ad-", "/ads/"]):
+                continue
+            if not src.startswith("http"):
+                src = "https://www.footyheadlines.com" + src
+            if src not in found_urls:
+                found_urls.append(src)
+
+    log.info("Article %s — found %d image URLs", url, len(found_urls))
+    collected: list[bytes] = []
+    for img_url in found_urls[:max_images * 2]:  # try more than we need
+        if len(collected) >= max_images:
+            break
+        data = _download_image(img_url)
+        if data and len(data) > 10_000:   # skip tiny/placeholder images
+            collected.append(data)
+            log.info("  Article image %d: %s", len(collected), img_url[:80])
+
+    log.info("Scraped %d usable images from article.", len(collected))
+    return collected
+
+
 def _story_content_type(title: str) -> str:
     """Return 'boot', 'kit', or 'general' based on title keywords."""
     t = title.lower()
@@ -953,6 +1008,7 @@ def search_pexels_image(query: str) -> "bytes | None":
 def find_images(
     title: str,
     preferred_url: "str | None" = None,
+    article_url: "str | None" = None,
     n: int = 3,
 ) -> "list[bytes]":
     """
@@ -970,7 +1026,16 @@ def find_images(
     """
     collected: list[bytes] = []
 
-    # ── Slide 1: use story's own image if available (most accurate) ──────────
+    # ── Priority 1: scrape actual article images (the REAL leaked renders) ───
+    # These are guaranteed to show the correct product — the same images
+    # the article is reporting on. Use these for all carousel slides.
+    if article_url:
+        article_imgs = scrape_article_images(article_url, max_images=n)
+        if article_imgs:
+            log.info("Using %d article images (actual product renders).", len(article_imgs))
+            return article_imgs[:n]
+
+    # ── Priority 2: tweet/RSS attached image ─────────────────────────────────
     if preferred_url:
         log.info("Trying preferred (tweet/RSS) image: %s", preferred_url)
         img = _download_image(preferred_url)
@@ -1292,47 +1357,77 @@ def main() -> None:
             unique.append(s)
     log.info("Unique stories after dedup: %d", len(unique))
 
-    # ── Score stories: boots > kits, leaked/spotted > generic news ───────────
+    # ── Score stories by mass appeal ─────────────────────────────────────────
     def _relevance_score(s: dict) -> int:
         """
-        Higher = post this first. Considers content type and tag.
-        Boots are the core focus; leaked/spotted content is the most engaging.
+        Higher = post this first.
+        Only post things mass audiences care about — big clubs, big players,
+        popular boots. Penalise niche products nobody outside enthusiasts knows.
         """
         t = s["title"].lower()
         score = 0
 
-        # Content type — boots beat kits beat generic news
-        if any(w in t for w in ["boot", "boots", "cleat", "cleats"]):
+        # ── Big clubs (massive global fanbases) ───────────────────────────────
+        big_clubs = [
+            "manchester united", "man utd", "arsenal", "liverpool", "chelsea",
+            "manchester city", "man city", "tottenham", "spurs",
+            "real madrid", "barcelona", "psg", "paris saint-germain",
+            "bayern", "juventus", "ac milan", "inter milan", "dortmund",
+            "atletico", "napoli", "brazil", "england", "france", "germany",
+            "argentina", "portugal", "spain",
+        ]
+        if any(c in t for c in big_clubs):
+            score += 25
+
+        # ── Big players (guaranteed engagement) ───────────────────────────────
+        big_names = [
+            "mbappe", "haaland", "salah", "ronaldo", "messi", "bellingham",
+            "vinicius", "saka", "kane", "de bruyne", "pedri", "yamal",
+            "rashford", "neymar", "lewandowski", "son", "martinelli",
+        ]
+        if any(n in t for n in big_names):
             score += 30
-        elif any(w in t for w in ["kit", "jersey", "shirt", "strip"]):
-            score += 10
-        # Kit stories are fine but boots come first for this account
 
-        # Tag type — leaked/spotted is more exciting
-        tag = pick_tag(s["title"])
-        tag_scores = {"LEAKED": 25, "SPOTTED": 20, "BREAKING": 15, "DROPPED": 10, "NEWS": 0}
-        score += tag_scores.get(tag, 0)
-
-        # Reward specific boot model mentions (more specific = more exciting)
-        boot_models = [
+        # ── Popular boot models (boot fans know these by name) ────────────────
+        hot_models = [
             "mercurial", "predator", "phantom", "tiempo", "superfly",
             "copa", "future", "ultra", "king", "tekela", "furon",
             "f50", "x speedflow", "speedportal",
         ]
-        if any(m in t for m in boot_models):
-            score += 15
-
-        # Reward big player name drops (more likely to get engagement)
-        big_names = [
-            "mbappe", "haaland", "salah", "ronaldo", "messi", "bellingham",
-            "vinicius", "saka", "kane", "de bruyne", "pedri", "yamal",
-        ]
-        if any(n in t for n in big_names):
+        if any(m in t for m in hot_models):
             score += 20
 
-        # Penalise pre-match / training shirts (low excitement)
-        if any(w in t for w in ["pre-match", "training shirt", "training top"]):
-            score -= 15
+        # ── Content type — boots first, then kits ────────────────────────────
+        if any(w in t for w in ["boot", "boots", "cleat", "cleats"]):
+            score += 20
+        elif any(w in t for w in ["kit", "jersey", "shirt", "strip"]):
+            score += 8   # kits are OK but boots come first
+
+        # ── Tag type — leaked/spotted is more exciting ────────────────────────
+        tag = pick_tag(s["title"])
+        tag_scores = {"LEAKED": 15, "SPOTTED": 20, "BREAKING": 15, "DROPPED": 10, "NEWS": 0}
+        score += tag_scores.get(tag, 0)
+
+        # ── HEAVY PENALTIES for niche / low-interest content ─────────────────
+        # Nobody outside kit collectors cares about these
+        niche_terms = [
+            "anthem jacket", "anthem track", "anthem top",
+            "pre-match", "training shirt", "training top", "training jacket",
+            "tracksuit", "rain jacket", "woven jacket",
+            "away kit info",        # secondary kit info posts (not reveals)
+            "overview",             # roundup posts
+            "world cup kit overview",
+        ]
+        if any(n in t for n in niche_terms):
+            score -= 35
+
+        # Obscure/smaller clubs that won't get engagement
+        obscure_clubs = [
+            "palermo", "galatasaray", "lyon", "monaco", "burnley",
+            "nottingham", "leicester", "brentford", "fulham", "wolves",
+        ]
+        if any(c in t for c in obscure_clubs):
+            score -= 20
 
         return score
 
@@ -1375,10 +1470,15 @@ def main() -> None:
     log.info("Caption: %s", caption)
 
     # ── Find images (3 for carousel) ─────────────────────────────────────────
-    # Uses fact-checked query (kit story → kit images, boot story → boot images)
-    # Slide 1 uses story's own tweet/RSS image if available (most accurate source)
+    # Priority: scrape actual article renders (exact product) →
+    #           tweet/RSS attached image → Pexels search (fact-checked query)
     preferred_img_url: "str | None" = story.get("tweet_image")
-    images_bytes = find_images(story["title"], preferred_url=preferred_img_url, n=3)
+    images_bytes = find_images(
+        story["title"],
+        preferred_url=preferred_img_url,
+        article_url=story.get("url"),  # scrape footyheadlines article for real renders
+        n=3,
+    )
 
     if not images_bytes:
         log.warning("No images found — will generate cards with dark placeholder.")
