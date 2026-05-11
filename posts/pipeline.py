@@ -45,6 +45,47 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 FOOTY_HEADLINES_URL = "https://www.footyheadlines.com"
 MAX_AGE_DAYS = 3
 
+# ── Nitter instances (tried in order; first live one wins) ───────────────────
+NITTER_INSTANCES = [
+    "https://nitter.privacydev.net",
+    "https://nitter.poast.org",
+    "https://nitter.1d4.us",
+    "https://nitter.kavin.rocks",
+    "https://nitter.mint.lgbt",
+    "https://lightbird.cc",
+]
+
+# Twitter/X accounts to monitor for boot & kit breaking news
+TWITTER_ACCOUNTS = [
+    "footyheadlines",   # #1 boot leak source
+    "NikeFootball",     # official Nike drops
+    "adidasFootball",   # official Adidas drops
+    "pumafootball",     # official Puma drops
+    "newbalance",       # official NB drops
+    "soccerbible",      # kit culture
+    "Kitboys_",         # kit leaks
+    "footballboots",    # boots news
+    "nikefootball",     # Nike alt account
+]
+
+# Keywords that make a tweet relevant (at least one must appear)
+BOOT_TWEET_KEYWORDS = [
+    "boot", "cleat", "kit", "jersey", "shirt", "strip", "kits",
+    "leaked", "leak", "revealed", "reveal", "drop", "release",
+    "colorway", "colourway", "collab", "collaboration",
+    "mercurial", "predator", "phantom", "tiempo", "superfly",
+    "copa", "nemeziz", "future", "ultra", "king", "evospeed",
+    "adidas", "nike", "puma", "new balance", "umbro", "mizuno",
+    "hummel", "castore", "macron",
+]
+
+# Extra RSS feeds beyond footyheadlines
+EXTRA_RSS_FEEDS = [
+    ("https://www.soccerbible.com/feed/",  "SoccerBible"),
+    ("https://www.footy-boots.com/feed/",  "Footy-Boots"),
+    ("https://www.kickster.eu/feed/",      "Kickster"),
+]
+
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
 GOOGLE_CX = "017576662512468239146:omuauf_lfve"
 PEXELS_API_KEY = os.environ.get("PEXELS_API_KEY", "")
@@ -220,6 +261,196 @@ def scrape_stories(max_age_days: int = MAX_AGE_DAYS) -> list[dict]:
 
     unique.sort(key=lambda x: x["age_days"])  # freshest first
     log.info("Found %d stories ≤ %d days old.", len(unique), max_age_days)
+    return unique
+
+
+# ---------------------------------------------------------------------------
+# 1b. Nitter (Twitter/X via open frontend RSS)
+# ---------------------------------------------------------------------------
+
+def _get_working_nitter() -> "str | None":
+    """Return the first Nitter instance that returns a 200."""
+    for instance in NITTER_INSTANCES:
+        try:
+            r = requests.get(
+                f"{instance}/footyheadlines/rss",
+                headers=HEADERS,
+                timeout=8,
+            )
+            if r.status_code == 200 and "<rss" in r.text[:500]:
+                log.info("Nitter instance available: %s", instance)
+                return instance
+        except Exception:
+            continue
+    log.warning("No Nitter instances responded — skipping Twitter scrape.")
+    return None
+
+
+def scrape_nitter(max_age_days: int = MAX_AGE_DAYS) -> list[dict]:
+    """
+    Scrape football boot/kit tweets via Nitter RSS feeds.
+    Returns same dict format as scrape_stories(), plus 'tweet_image' key.
+    """
+    try:
+        import feedparser  # noqa: PLC0415
+    except ImportError:
+        log.warning("feedparser not installed — skipping Nitter.")
+        return []
+
+    nitter = _get_working_nitter()
+    if not nitter:
+        return []
+
+    now = datetime.now(tz=timezone.utc)
+    stories: list[dict] = []
+
+    for account in TWITTER_ACCOUNTS:
+        rss_url = f"{nitter}/{account}/rss"
+        try:
+            feed = feedparser.parse(rss_url)
+            if not feed.entries:
+                continue
+            for entry in feed.entries[:25]:
+                title   = entry.get("title",   "")
+                summary = entry.get("summary", "")
+                full    = f"{title} {BeautifulSoup(summary, 'html.parser').get_text(' ', strip=True)}"
+                full_l  = full.lower()
+
+                # Must mention boots/kits to be relevant
+                if not any(kw in full_l for kw in BOOT_TWEET_KEYWORDS):
+                    continue
+
+                # ── Date ──────────────────────────────────────────────────
+                published = entry.get("published_parsed")
+                if published:
+                    story_date = datetime(*published[:6], tzinfo=timezone.utc)
+                else:
+                    story_date = now
+                age_days = (now - story_date).days
+                if age_days > max_age_days:
+                    continue
+
+                # ── Image (from tweet media) ───────────────────────────────
+                tweet_image: "str | None" = None
+                img_m = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', summary)
+                if img_m:
+                    img_url = img_m.group(1)
+                    # Nitter proxies images — turn relative URLs absolute
+                    if img_url.startswith("/"):
+                        img_url = nitter + img_url
+                    tweet_image = img_url
+
+                # ── Clean headline ─────────────────────────────────────────
+                clean = re.sub(r"https?://\S+", "", full).strip()
+                clean = re.sub(r"\s+", " ", clean)
+                # Trim to a sensible length
+                if len(clean) > 120:
+                    clean = clean[:117] + "…"
+                if len(clean) < 15:
+                    continue
+
+                link = entry.get("link", f"https://x.com/{account}")
+                if not link.startswith("http"):
+                    link = f"https://x.com/{account}"
+
+                sid = _story_id(clean)
+                stories.append({
+                    "id":          sid,
+                    "title":       clean,
+                    "url":         link,
+                    "date":        story_date.isoformat(),
+                    "age_days":    age_days,
+                    "source":      f"@{account} on X",
+                    "tweet_image": tweet_image,
+                })
+        except Exception as exc:
+            log.warning("Nitter scrape failed for @%s: %s", account, exc)
+
+    # De-duplicate
+    seen: set[str] = set()
+    unique: list[dict] = []
+    for s in stories:
+        if s["id"] not in seen:
+            seen.add(s["id"])
+            unique.append(s)
+
+    unique.sort(key=lambda x: x["age_days"])
+    log.info("Nitter: %d boot/kit tweets ≤ %d days old.", len(unique), max_age_days)
+    return unique
+
+
+# ---------------------------------------------------------------------------
+# 1c. Extra RSS feeds (SoccerBible, Footy-Boots, Kickster)
+# ---------------------------------------------------------------------------
+
+def scrape_rss_feeds(max_age_days: int = MAX_AGE_DAYS) -> list[dict]:
+    """Scrape additional football news RSS sources."""
+    try:
+        import feedparser  # noqa: PLC0415
+    except ImportError:
+        log.warning("feedparser not installed — skipping extra RSS.")
+        return []
+
+    now = datetime.now(tz=timezone.utc)
+    stories: list[dict] = []
+
+    for feed_url, source_name in EXTRA_RSS_FEEDS:
+        try:
+            feed = feedparser.parse(feed_url)
+            for entry in feed.entries[:20]:
+                title = entry.get("title", "").strip()
+                if not title or len(title) < 10:
+                    continue
+
+                published = entry.get("published_parsed")
+                story_date = datetime(*published[:6], tzinfo=timezone.utc) if published else now
+                age_days = (now - story_date).days
+                if age_days > max_age_days:
+                    continue
+
+                link = entry.get("link", "")
+
+                # Try to pull image from feed entry
+                feed_image: "str | None" = None
+                media = entry.get("media_content", [])
+                if media:
+                    feed_image = media[0].get("url")
+                if not feed_image:
+                    for enc in entry.get("enclosures", []):
+                        if enc.get("type", "").startswith("image"):
+                            feed_image = enc.get("href") or enc.get("url")
+                            break
+                if not feed_image:
+                    raw = (
+                        entry.get("summary", "")
+                        or (entry.get("content") or [{}])[0].get("value", "")
+                    )
+                    im = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', raw)
+                    if im:
+                        feed_image = im.group(1)
+
+                sid = _story_id(title)
+                stories.append({
+                    "id":          sid,
+                    "title":       title,
+                    "url":         link,
+                    "date":        story_date.isoformat(),
+                    "age_days":    age_days,
+                    "source":      source_name,
+                    "tweet_image": feed_image,
+                })
+        except Exception as exc:
+            log.warning("RSS scrape failed for %s: %s", source_name, exc)
+
+    seen: set[str] = set()
+    unique: list[dict] = []
+    for s in stories:
+        if s["id"] not in seen:
+            seen.add(s["id"])
+            unique.append(s)
+
+    unique.sort(key=lambda x: x["age_days"])
+    log.info("RSS feeds: %d stories ≤ %d days old.", len(unique), max_age_days)
     return unique
 
 
@@ -511,11 +742,25 @@ def search_pexels_image(query: str) -> "bytes | None":
     return None
 
 
-def find_image(title: str) -> "bytes | None":
+def find_image(title: str, preferred_url: "str | None" = None) -> "bytes | None":
     """
-    Try Google first, Pexels second.
-    Query is title + 'football boot' to keep results product-focused.
+    Image search with priority order:
+      1. preferred_url  — direct image from the tweet / RSS feed (most relevant)
+      2. Google Custom Search
+      3. Pexels
+      4. Generic fallback query
+
+    preferred_url is passed for stories that carry a tweet_image / feed_image.
     """
+    # ── Priority: use the image that came with the story ─────────────────────
+    if preferred_url:
+        log.info("Trying preferred (tweet/RSS) image: %s", preferred_url)
+        img = _download_image(preferred_url)
+        if img and len(img) > 5000:
+            log.info("Using preferred image (%d bytes).", len(img))
+            return img
+        log.debug("Preferred image unavailable — falling back to search.")
+
     base_query = re.sub(r"\s*[|—–-].*$", "", title).strip()
     query = f"{base_query} football boot"
 
@@ -748,16 +993,36 @@ def main() -> None:
     posted = _load_posted()
     log.info("Stories already posted: %d", len(posted))
 
-    # ── Scrape ───────────────────────────────────────────────────────────────
-    stories = scrape_stories()
-    if not stories:
-        log.warning("No stories found. Exiting without posting.")
+    # ── Scrape all sources ────────────────────────────────────────────────────
+    fh_stories   = scrape_stories()
+    nitter_stories = scrape_nitter()
+    rss_stories  = scrape_rss_feeds()
+
+    all_stories = fh_stories + nitter_stories + rss_stories
+    log.info(
+        "Total candidates — FootyHeadlines: %d  Nitter: %d  RSS: %d  Combined: %d",
+        len(fh_stories), len(nitter_stories), len(rss_stories), len(all_stories),
+    )
+
+    if not all_stories:
+        log.warning("No stories found from any source. Exiting without posting.")
         return
 
+    # ── Merge: sort freshest-first, deduplicate ───────────────────────────────
+    all_stories.sort(key=lambda x: x["age_days"])
+    seen_ids: set[str] = set()
+    unique: list[dict] = []
+    for s in all_stories:
+        if s["id"] not in seen_ids:
+            seen_ids.add(s["id"])
+            unique.append(s)
+    log.info("Unique stories after dedup: %d", len(unique))
+
     # ── Pick first unposted story ─────────────────────────────────────────────
-    story = None
-    for s in stories:
-        if not _already_posted(s["id"], posted):
+    posted_ids = {p.get("id") for p in posted}
+    story: "dict | None" = None
+    for s in unique:
+        if s["id"] not in posted_ids:
             story = s
             break
 
@@ -765,7 +1030,12 @@ def main() -> None:
         log.info("All recent stories have already been posted. Nothing to do.")
         return
 
-    log.info("Selected story: %r (age %d days)", story["title"], story["age_days"])
+    log.info(
+        "Selected story: %r  source=%s  age=%d days",
+        story["title"],
+        story.get("source", "FootyHeadlines"),
+        story["age_days"],
+    )
 
     # ── Prepare content ──────────────────────────────────────────────────────
     tag = pick_tag(story["title"])
@@ -776,7 +1046,11 @@ def main() -> None:
     log.info("Caption: %s", caption)
 
     # ── Find image ────────────────────────────────────────────────────────────
-    img_bytes = find_image(story["title"])
+    # Pass tweet_image / feed_image as the preferred URL so we use the actual
+    # boot/kit photo attached to the tweet or RSS entry before falling back to
+    # Google / Pexels searches.
+    preferred_img_url: "str | None" = story.get("tweet_image")
+    img_bytes = find_image(story["title"], preferred_url=preferred_img_url)
     tmp_img_path: "str | None" = None
 
     if img_bytes:
