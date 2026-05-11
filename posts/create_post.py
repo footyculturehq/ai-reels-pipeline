@@ -412,8 +412,11 @@ def create_post(
 
     # ── Print IG caption to terminal ────────────────────────────────────────
     if caption:
+        import sys as _sys
+        _enc = _sys.stdout.encoding or "utf-8"
+        _safe = caption.encode(_enc, errors="replace").decode(_enc)
         print("\n--- INSTAGRAM CAPTION ---")
-        print(caption)
+        print(_safe)
         print("-------------------------\n")
 
     return output_path

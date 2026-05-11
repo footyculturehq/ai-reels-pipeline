@@ -949,14 +949,31 @@ def find_image(title: str, preferred_url: "str | None" = None) -> "bytes | None"
 # 6. Generate post image
 # ---------------------------------------------------------------------------
 
+def card_subtext(tag: str) -> str:
+    """
+    Short clean line shown on the image card below the headline.
+    No emojis — must survive any font/encoding on the card renderer.
+    """
+    return {
+        "LEAKED":   "Leaked — unreleased design surfacing early.",
+        "SPOTTED":  "Spotted on feet before the official reveal.",
+        "BREAKING": "Official confirmation just dropped.",
+        "DROPPED":  "Available now — the wait is over.",
+        "NEWS":     "Latest from the world of football boots & kits.",
+    }.get(tag, "Football boot & kit news.")
+
+
 def generate_post_image(
     headline: str,
-    caption: str,
+    ig_caption: str,
     image_path: "str | None",
     tag: str,
 ) -> "str | None":
     """
     Calls create_post.create_post() and returns the output PNG path.
+    ig_caption is the full Instagram caption (emojis + hashtags) — it is
+    printed to the terminal by create_post for reference but NOT rendered
+    on the card.  card_subtext() provides the clean on-card sub-line.
     Returns None on failure.
     """
     try:
@@ -969,7 +986,7 @@ def generate_post_image(
 
         create_post(
             headline=headline,
-            caption=caption,
+            caption=card_subtext(tag),   # clean on-card sub-line, no emojis
             image_path=image_path,
             tag=tag,
             size="portrait",
@@ -1230,6 +1247,8 @@ def main() -> None:
 
     # ── Generate post card ────────────────────────────────────────────────────
     post_path = generate_post_image(headline, caption, tmp_img_path, tag)
+    # Note: `caption` is the full Instagram caption (emojis + hashtags + CTA).
+    # generate_post_image passes card_subtext(tag) to the card renderer instead.
 
     # Clean up temp image
     if tmp_img_path and os.path.exists(tmp_img_path):
