@@ -638,65 +638,148 @@ def format_headline(title: str) -> str:
 # 4. Build Instagram caption
 # ---------------------------------------------------------------------------
 
+# Emoji and opening line templates per tag type
+_CAPTION_TEMPLATES: dict[str, list[str]] = {
+    "LEAKED": [
+        "👀 {title}.",
+        "🔓 {title}.",
+        "🚨 {title}.",
+    ],
+    "SPOTTED": [
+        "🔍 {title}.",
+        "👟 {title}.",
+        "📸 {title}.",
+    ],
+    "BREAKING": [
+        "🚨 {title}.",
+        "⚡ {title}.",
+        "📢 {title}.",
+    ],
+    "DROPPED": [
+        "🔥 {title}.",
+        "💥 {title}.",
+        "👟 {title}.",
+    ],
+    "NEWS": [
+        "⚽ {title}.",
+        "🗞️ {title}.",
+        "📰 {title}.",
+    ],
+}
+
+_FOLLOW_LINES: dict[str, str] = {
+    "LEAKED":   "Early intel only lands here first — follow @footyculturehq 👇",
+    "SPOTTED":  "Caught before the official reveal. Follow @footyculturehq for daily boot spotting 👇",
+    "BREAKING": "Stay ahead of the game — follow @footyculturehq for the fastest boot & kit news 👇",
+    "DROPPED":  "Don't sleep — follow @footyculturehq so you never miss a drop 👇",
+    "NEWS":     "Follow @footyculturehq for daily football boot & kit news 👇",
+}
+
+
 def build_caption(title: str, tag: str) -> str:
-    """3-4 hashtags relevant to the story + the handle."""
+    """
+    Build a proper Instagram caption with:
+      - An emoji-led opening sentence based on the story title
+      - A short context line relevant to the tag (leaked / spotted / breaking / etc.)
+      - A follow CTA
+      - Relevant hashtags on a separate line
+    """
+    import hashlib  # for stable template selection without randomness
+
     title_l = title.lower()
 
-    tags: list[str] = []
+    # ── Opening sentence ─────────────────────────────────────────────────────
+    templates = _CAPTION_TEMPLATES.get(tag, _CAPTION_TEMPLATES["NEWS"])
+    # Pick deterministically from title hash so same story always gets same emoji
+    idx = int(hashlib.md5(title.encode()).hexdigest(), 16) % len(templates)
+    opening = templates[idx].format(title=title)
 
-    # Brand hashtags
+    # ── Context line based on tag ─────────────────────────────────────────────
+    context_map = {
+        "LEAKED":   "Leaked colourway / unreleased design hitting the internet before the brand is ready for it. 👀",
+        "SPOTTED":  "Spotted on feet before any official announcement — this is what the boots community lives for.",
+        "BREAKING": "This one's official — straight from the source.",
+        "DROPPED":  "It's here. No more waiting.",
+        "NEWS":     "The latest from the world of football boots and kits.",
+    }
+    context = context_map.get(tag, context_map["NEWS"])
+
+    # ── CTA ──────────────────────────────────────────────────────────────────
+    cta = _FOLLOW_LINES.get(tag, _FOLLOW_LINES["NEWS"])
+
+    # ── Hashtags ──────────────────────────────────────────────────────────────
+    hashtags: list[str] = []
+
+    # Brand
     brand_map = {
-        "nike": "#Nike",
-        "adidas": "#Adidas",
-        "puma": "#Puma",
-        "new balance": "#NewBalance",
-        "mizuno": "#Mizuno",
-        "umbro": "#Umbro",
+        "nike":         "#Nike #NikeFootball",
+        "adidas":       "#Adidas #adidasFootball",
+        "puma":         "#Puma #PumaFootball",
+        "new balance":  "#NewBalance #NBFootball",
+        "mizuno":       "#Mizuno",
+        "umbro":        "#Umbro",
         "under armour": "#UnderArmour",
+        "castore":      "#Castore",
+        "hummel":       "#Hummel",
     }
     for brand, ht in brand_map.items():
         if brand in title_l:
-            tags.append(ht)
+            hashtags.extend(ht.split())
             break
 
-    # Topic hashtags
-    topic_map = {
-        "boot": "#FootballBoots",
-        "cleat": "#FootballBoots",
-        "kit": "#FootballKit",
-        "jersey": "#FootballKit",
-        "shirt": "#FootballKit",
-        "goalkeeper": "#GoalkeeperKit",
+    # Product type
+    if any(w in title_l for w in ["boot", "cleat", "boots", "cleats"]):
+        hashtags += ["#FootballBoots", "#Boots"]
+    elif any(w in title_l for w in ["kit", "jersey", "shirt", "strip"]):
+        hashtags += ["#FootballKit", "#NewKit"]
+
+    # Specific boot models
+    model_tags = {
+        "mercurial":  "#Mercurial",
+        "predator":   "#Predator",
+        "phantom":    "#Phantom",
+        "tiempo":     "#Tiempo",
+        "superfly":   "#Superfly",
+        "copa":       "#Copa",
+        "future":     "#PumaFuture",
+        "ultra":      "#PumaUltra",
+        "king":       "#PumaKing",
+        "tekela":     "#NewBalanceTekela",
+        "furon":      "#NewBalanceFuron",
+        "f50":        "#AdidasF50",
+        "x speedflow":"#XSpeedflow",
+        "speedportal":"#Speedportal",
     }
-    for kw, ht in topic_map.items():
-        if kw in title_l:
-            tags.append(ht)
+    for model, ht in model_tags.items():
+        if model in title_l:
+            hashtags.append(ht)
             break
 
-    # Always include these core tags
-    tags.append("#FootyCultureHQ")
-    tags.append("#FootballNews")
-
-    # Add a tag-specific hashtag
+    # Tag-type hashtag
     tag_ht = {
-        "LEAKED":   "#FootballLeaks",
-        "SPOTTED":  "#BootSpotted",
-        "BREAKING": "#BreakingNews",
-        "DROPPED":  "#JustDropped",
-        "NEWS":     "#FootballBoots",
+        "LEAKED":   "#FootballLeaks #BootLeaks",
+        "SPOTTED":  "#BootSpotted #SpottedOnFeet",
+        "BREAKING": "#BreakingNews #FootballNews",
+        "DROPPED":  "#JustDropped #NewRelease",
+        "NEWS":     "#FootballNews",
     }
-    tags.append(tag_ht.get(tag, "#Football"))
+    hashtags.extend(tag_ht.get(tag, "#Football").split())
 
-    # Deduplicate while preserving order, limit to 5
+    # Always
+    hashtags += ["#FootyCultureHQ", "#FootballCulture"]
+
+    # Deduplicate preserving order
     seen: set[str] = set()
     unique_tags: list[str] = []
-    for t in tags:
+    for t in hashtags:
         if t not in seen:
             seen.add(t)
             unique_tags.append(t)
-    unique_tags = unique_tags[:5]
 
-    return " ".join(unique_tags)
+    # Cap at 20 hashtags (Instagram allows 30 but 20 looks clean)
+    tag_block = " ".join(unique_tags[:20])
+
+    return f"{opening}\n\n{context}\n\n{cta}\n\n.\n.\n.\n{tag_block}"
 
 
 # ---------------------------------------------------------------------------
