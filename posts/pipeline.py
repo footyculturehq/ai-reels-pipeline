@@ -652,18 +652,88 @@ def post_to_instagram(image_path: str, caption: str) -> bool:
     except Exception as exc:
         log.warning("Could not save session: %s", exc)
 
+    # ── Prepare image: Instagram requires JPEG, max portrait ratio 4:5 ────────
+    import tempfile as _tmpfile
+    from PIL import Image as _Image
+
+    upload_path = image_path
+    _tmp_jpeg = None
+    try:
+        with _Image.open(image_path) as img:
+            w, h = img.size
+            # Crop to 4:5 (1080×1350) if image is taller than that ratio
+            max_h = int(w * 5 / 4)
+            if h > max_h:
+                # Centre-crop: remove equal slices from top and bottom
+                top = (h - max_h) // 2
+                img = img.crop((0, top, w, top + max_h))
+                log.info("Cropped image from %dx%d to %dx%d (4:5 ratio)", w, h, w, max_h)
+
+            # Convert to JPEG (Instagram's preferred format)
+            _tmp_fd, _tmp_path = _tmpfile.mkstemp(suffix=".jpg",
+                                                   dir=str(OUTPUT_DIR))
+            import os as _os; _os.close(_tmp_fd)
+            img.convert("RGB").save(_tmp_path, "JPEG", quality=95)
+            upload_path = _tmp_path
+            _tmp_jpeg = _tmp_path
+            log.info("Converted to JPEG for upload: %s", upload_path)
+    except Exception as exc:
+        log.warning("Image prep failed (%s) — uploading original PNG", exc)
+
+    # ── Monkey-patch instagrapi for Instagram's updated configure response ────
+    # As of 2025, /api/v1/media/configure/ returns {"status":"ok"} with no
+    # media payload.  Patch _extract_configured_media_or_raise to detect this
+    # and fetch the freshly-uploaded media via user_medias instead.
+    from instagrapi.mixins import media as _media_mixin  # noqa: PLC0415
+
+    _original_extract = _media_mixin.MediaMixin._extract_configured_media_or_raise
+
+    def _patched_extract(self, configured, exception_cls, context):
+        last = self.last_json if isinstance(self.last_json, dict) else {}
+        cfg  = configured    if isinstance(configured,    dict) else {}
+        # Success path: status ok but no media key → fetch the latest post
+        if last.get("status") == "ok" or cfg.get("status") == "ok":
+            import time as _t; _t.sleep(2)
+            try:
+                medias = self.user_medias_v1(self.user_id, amount=1)
+                if medias:
+                    log.info("Fetched latest media after configure: %s", medias[0].pk)
+                    return medias[0]
+            except Exception as _fe:
+                log.warning("Could not fetch latest media: %s", _fe)
+            # Return a minimal stub so the pipeline can mark the story posted
+            from instagrapi.types import Media as _Media  # noqa: PLC0415
+            return _Media(pk="0", id="0", code="", media_type=1,
+                         taken_at=__import__("datetime").datetime.now())
+        return _original_extract(self, configured, exception_cls, context)
+
+    _media_mixin.MediaMixin._extract_configured_media_or_raise = _patched_extract
+
     # Upload the post
     log.info("Uploading photo to Instagram …")
     try:
+        import time as _time
+        _time.sleep(1)
         media = cl.photo_upload(
-            path=image_path,
+            path=upload_path,
             caption=caption,
+            extra_data={"custom_accessibility_caption": "", "like_and_view_counts_disabled": 0},
         )
-        log.info("Posted! Media ID: %s  URL: https://www.instagram.com/p/%s/",
-                 media.pk, media.code)
+        if media.code:
+            log.info("Posted! Media ID: %s  URL: https://www.instagram.com/p/%s/",
+                     media.pk, media.code)
+        else:
+            log.info("Posted! (media details unavailable — check @footyculturehq)")
+        if _tmp_jpeg:
+            import os as _os2; _os2.unlink(_tmp_jpeg)
         return True
     except Exception as exc:
         log.error("Instagram photo upload failed: %s", exc, exc_info=True)
+        if _tmp_jpeg:
+            try:
+                import os as _os3; _os3.unlink(_tmp_jpeg)
+            except Exception:
+                pass
         return False
 
 
