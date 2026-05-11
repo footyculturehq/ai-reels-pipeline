@@ -41,7 +41,7 @@ PITCH_BLACK = (0, 0, 0)
 WHITE       = (255, 255, 255)
 HANDLE      = "@footyculturehq"
 
-SIZES = {"portrait": (1080, 1440), "square": (1080, 1080)}
+SIZES = {"portrait": (1080, 1350), "square": (1080, 1080)}  # 1350 = 4:5 Instagram max portrait
 
 # Words that are auto-highlighted in acid green (case-insensitive)
 AUTO_GREEN = {

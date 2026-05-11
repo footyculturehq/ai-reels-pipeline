@@ -1078,7 +1078,9 @@ def post_to_instagram(image_path: str, caption: str) -> bool:
     except Exception as exc:
         log.warning("Could not save session: %s", exc)
 
-    # ── Prepare image: Instagram requires JPEG, max portrait ratio 4:5 ────────
+    # ── Prepare image: convert PNG → JPEG (Instagram requirement) ───────────
+    # create_post.py now generates directly at 1080×1350 (4:5), so NO crop
+    # is needed here. We just convert to JPEG at high quality.
     import tempfile as _tmpfile
     from PIL import Image as _Image
 
@@ -1087,15 +1089,16 @@ def post_to_instagram(image_path: str, caption: str) -> bool:
     try:
         with _Image.open(image_path) as img:
             w, h = img.size
-            # Crop to 4:5 (1080×1350) if image is taller than that ratio
+            log.info("Card size: %dx%d", w, h)
+
+            # Safety net: if somehow the card is still taller than 4:5, crop
+            # from the BOTTOM only (preserves the top — where subjects' faces are)
             max_h = int(w * 5 / 4)
             if h > max_h:
-                # Centre-crop: remove equal slices from top and bottom
-                top = (h - max_h) // 2
-                img = img.crop((0, top, w, top + max_h))
-                log.info("Cropped image from %dx%d to %dx%d (4:5 ratio)", w, h, w, max_h)
+                img = img.crop((0, 0, w, max_h))
+                log.info("Safety crop applied: %dx%d → %dx%d", w, h, w, max_h)
 
-            # Convert to JPEG (Instagram's preferred format)
+            # Convert to JPEG
             _tmp_fd, _tmp_path = _tmpfile.mkstemp(suffix=".jpg",
                                                    dir=str(OUTPUT_DIR))
             import os as _os; _os.close(_tmp_fd)
@@ -1199,10 +1202,65 @@ def main() -> None:
             unique.append(s)
     log.info("Unique stories after dedup: %d", len(unique))
 
-    # ── Pick first unposted story ─────────────────────────────────────────────
+    # ── Score stories: boots > kits, leaked/spotted > generic news ───────────
+    def _relevance_score(s: dict) -> int:
+        """
+        Higher = post this first. Considers content type and tag.
+        Boots are the core focus; leaked/spotted content is the most engaging.
+        """
+        t = s["title"].lower()
+        score = 0
+
+        # Content type — boots beat kits beat generic news
+        if any(w in t for w in ["boot", "boots", "cleat", "cleats"]):
+            score += 30
+        elif any(w in t for w in ["kit", "jersey", "shirt", "strip"]):
+            score += 10
+        # Kit stories are fine but boots come first for this account
+
+        # Tag type — leaked/spotted is more exciting
+        tag = pick_tag(s["title"])
+        tag_scores = {"LEAKED": 25, "SPOTTED": 20, "BREAKING": 15, "DROPPED": 10, "NEWS": 0}
+        score += tag_scores.get(tag, 0)
+
+        # Reward specific boot model mentions (more specific = more exciting)
+        boot_models = [
+            "mercurial", "predator", "phantom", "tiempo", "superfly",
+            "copa", "future", "ultra", "king", "tekela", "furon",
+            "f50", "x speedflow", "speedportal",
+        ]
+        if any(m in t for m in boot_models):
+            score += 15
+
+        # Reward big player name drops (more likely to get engagement)
+        big_names = [
+            "mbappe", "haaland", "salah", "ronaldo", "messi", "bellingham",
+            "vinicius", "saka", "kane", "de bruyne", "pedri", "yamal",
+        ]
+        if any(n in t for n in big_names):
+            score += 20
+
+        # Penalise pre-match / training shirts (low excitement)
+        if any(w in t for w in ["pre-match", "training shirt", "training top"]):
+            score -= 15
+
+        return score
+
+    # Sort: freshest first, then by relevance within same age
+    unposted = [s for s in unique if s["id"] not in {p.get("id") for p in posted}]
+    unposted.sort(key=lambda s: (s["age_days"], -_relevance_score(s)))
+
+    for s in unique:  # log all candidates so we can see what's available
+        tag_preview = pick_tag(s["title"])
+        log.info(
+            "  [score=%+d age=%d tag=%-8s] %s",
+            _relevance_score(s), s["age_days"], tag_preview, s["title"][:70],
+        )
+
+    # ── Pick best unposted story ──────────────────────────────────────────────
     posted_ids = {p.get("id") for p in posted}
     story: "dict | None" = None
-    for s in unique:
+    for s in unposted:
         if s["id"] not in posted_ids:
             story = s
             break
