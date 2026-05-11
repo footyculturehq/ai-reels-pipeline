@@ -55,31 +55,54 @@ NITTER_INSTANCES = [
     "https://lightbird.cc",
 ]
 
-# Twitter/X accounts to monitor for boot & kit breaking news
+# Twitter/X accounts to monitor — focused on LEAK & SPOTTER community,
+# NOT official brand accounts (they post marketing, not early gossip).
+# These accounts specialise in: athletes caught in unreleased boots at
+# training/warm-ups, leaked colorways, rumoured releases, sample boots.
 TWITTER_ACCOUNTS = [
-    "footyheadlines",   # #1 boot leak source
-    "NikeFootball",     # official Nike drops
-    "adidasFootball",   # official Adidas drops
-    "pumafootball",     # official Puma drops
-    "newbalance",       # official NB drops
-    "soccerbible",      # kit culture
-    "Kitboys_",         # kit leaks
-    "footballboots",    # boots news
-    "nikefootball",     # Nike alt account
+    # ── Tier 1: Dedicated boot & kit leak accounts ───────────────────────────
+    "footyheadlines",   # #1 boot leak source — renders, training spots, rumours
+    "Kitboys_",         # kit / jersey leaks before official reveal
+    "soccerbible",      # boot & kit culture, first-looks, exclusives
+    "thebootroom",      # boot news, early reviews, leaked colourways
+    "Footy_Boots",      # footy-boots.com — early hands-on & training spots
+    # ── Tier 2: Spotter / community accounts ────────────────────────────────
+    "footballboots",    # boots community — spotted in training & matches
+    "BootsOnPitch",     # boots spotted being worn on pitch before release
+    "UltraBoot",        # boot hype, leaks, unreleased samples
+    "soccercleats101",  # cleat news, leaks, rumours (US angle)
+    "KleanBoots",       # boots culture, spotted colourways
+    "thebootologist",   # deep-dive boot analysis and leaked info
+    "SoccerCleats",     # cleat leaks and early release info
 ]
 
-# Keywords that make a tweet relevant (at least one must appear)
+# Keywords to keep a tweet relevant — heavy on LEAK / SPOTTER language.
+# At least one must match (case-insensitive) for the tweet to be included.
 BOOT_TWEET_KEYWORDS = [
-    "boot", "cleat", "kit", "jersey", "shirt", "strip", "kits",
-    "leaked", "leak", "revealed", "reveal", "drop", "release",
-    "colorway", "colourway", "collab", "collaboration",
+    # ── Leak / gossip / hype verbs ────────────────────────────────────────────
+    "spotted", "leaked", "leak", "exclusive", "first look", "first-look",
+    "unreleased", "prototype", "sample", "unboxing",
+    "rumoured", "rumored", "rumour", "rumor",
+    "coming soon", "dropping", "drop", "upcoming",
+    "revealed", "reveal", "confirmed", "breaking",
+    "training", "training ground", "warm-up", "warmup", "warm up",
+    "match worn", "game worn", "worn by", "wearing",
+    "release", "colourway", "colorway", "collab", "collaboration",
+    "player edition", "pe boot", "limited edition", "special edition",
+    # ── Product types ────────────────────────────────────────────────────────
+    "boot", "boots", "cleat", "cleats",
+    "kit", "kits", "jersey", "shirt", "strip",
+    # ── Specific boot models (catches model leaks even without 'boot') ────────
     "mercurial", "predator", "phantom", "tiempo", "superfly",
-    "copa", "nemeziz", "future", "ultra", "king", "evospeed",
+    "copa", "nemeziz", "x speedflow", "speedportal", "f50",
+    "future", "ultra", "king", "evospeed", "tekela",
+    "supercharge", "360", "trx", "icon",
+    # ── Brands (catches brand mention even without product word) ─────────────
     "adidas", "nike", "puma", "new balance", "umbro", "mizuno",
-    "hummel", "castore", "macron",
+    "hummel", "castore", "macron", "asics", "lotto", "pantofola",
 ]
 
-# Extra RSS feeds beyond footyheadlines
+# Extra RSS feeds — leak/culture focused, not brand official feeds
 EXTRA_RSS_FEEDS = [
     ("https://www.soccerbible.com/feed/",  "SoccerBible"),
     ("https://www.footy-boots.com/feed/",  "Footy-Boots"),
@@ -516,9 +539,19 @@ def _month_num(name: str) -> int:
 # 2. Choose tag based on story content
 # ---------------------------------------------------------------------------
 _TAG_KEYWORDS: list[tuple[str, list[str]]] = [
+    # LEAKED: rumours and unreleased early sightings
+    ("LEAKED",   ["leaked", "leak", "unreleased", "prototype", "sample", "rumoured",
+                  "rumored", "rumour", "rumor", "exclusive", "first look", "first-look",
+                  "player edition", "pe boot", "unboxing"]),
+    # SPOTTED: athlete seen wearing boots/kit before official reveal
+    ("SPOTTED",  ["spotted", "training", "training ground", "warm-up", "warmup",
+                  "warm up", "match worn", "game worn", "worn by", "wearing",
+                  "on feet", "on pitch"]),
+    # BREAKING: official confirmations and announcements
     ("BREAKING", ["breaking", "confirmed", "official", "announced"]),
-    ("DROPPED",  ["release", "drop", "launch", "on sale", "available now", "buy now"]),
-    ("SPOTTED",  ["spotted", "leaked", "training", "match worn", "worn by"]),
+    # DROPPED: product launches and release-day posts
+    ("DROPPED",  ["release", "drop", "launch", "on sale", "available now", "buy now",
+                  "dropping", "coming soon"]),
     ("NEWS",     []),  # default
 ]
 
@@ -599,10 +632,11 @@ def build_caption(title: str, tag: str) -> str:
 
     # Add a tag-specific hashtag
     tag_ht = {
+        "LEAKED":   "#FootballLeaks",
+        "SPOTTED":  "#BootSpotted",
         "BREAKING": "#BreakingNews",
-        "DROPPED": "#JustDropped",
-        "SPOTTED": "#FootballLeaks",
-        "NEWS": "#FootballTransfers",
+        "DROPPED":  "#JustDropped",
+        "NEWS":     "#FootballBoots",
     }
     tags.append(tag_ht.get(tag, "#Football"))
 
