@@ -984,9 +984,26 @@ def scrape_article_images(url: str, max_images: int = 4) -> "list[bytes]":
         if len(collected) >= max_images:
             break
         data = _download_image(img_url)
-        if data and len(data) > 10_000:   # skip tiny/placeholder images
-            collected.append(data)
-            log.info("  Article image %d: %s", len(collected), img_url[:80])
+        if not data or len(data) < 10_000:   # skip tiny/placeholder images
+            continue
+
+        # ── Skip split-panel / landscape composites ──────────────────────────
+        # footyheadlines og:images are often wide 2-panel shots (two kit angles
+        # side by side).  These look terrible on Instagram and may show the
+        # wrong product in the cropped area.  Only accept images that are
+        # roughly portrait or square (aspect ratio ≤ 1.35).
+        try:
+            check = Image.open(io.BytesIO(data))
+            ar = check.width / check.height
+            if ar > 1.35:
+                log.debug("Skipping wide/landscape article image (ar=%.2f): %s",
+                          ar, img_url[:70])
+                continue
+        except Exception:
+            pass  # can't determine aspect ratio — accept it anyway
+
+        collected.append(data)
+        log.info("  Article image %d: %s", len(collected), img_url[:80])
 
     log.info("Scraped %d usable images from article.", len(collected))
     return collected

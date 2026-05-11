@@ -30,6 +30,7 @@ FONT_DIR   = SCRIPT_DIR / "fonts"
 
 WHITE       = (255, 255, 255)
 PITCH_BLACK = (0,   0,   0)
+NEON_GREEN  = (0,  255, 102)   # brand green for boot icon
 
 # Instagram 4:5 — generated at correct ratio so no cropping ever needed
 SIZES = {"portrait": (1080, 1350), "square": (1080, 1080)}
@@ -49,6 +50,49 @@ CATEGORY_LABELS = {
     "SPOTTED":      "SPOTTED",
     "FOOTBALL":     "FOOTBALL",
 }
+
+# ---------------------------------------------------------------------------
+# Boot icon
+# ---------------------------------------------------------------------------
+
+# Normalised polygon points for a right-facing football boot silhouette.
+# x ranges 0 → 1.0, y ranges 0 → ~0.90  (height is the bounding height).
+_BOOT_PTS = [
+    (0.00, 0.52),  # heel-back top
+    (0.00, 0.27),  # upper-back
+    (0.12, 0.09),  # collar
+    (0.36, 0.00),  # vamp top
+    (0.64, 0.00),  # toe upper
+    (0.88, 0.08),  # toe outer upper
+    (1.00, 0.28),  # toe tip
+    (0.96, 0.60),  # toe outer lower
+    (0.80, 0.80),  # toe-sole junction
+    (0.44, 0.90),  # mid-sole
+    (0.07, 0.90),  # heel-sole
+    (0.00, 0.70),  # heel bottom
+]
+_STUD_XS = [0.12, 0.30, 0.52, 0.70]   # x-fractions for stud dots
+
+
+def _draw_boot_icon(draw: "ImageDraw.ImageDraw", x: int, y: int, h: int) -> int:
+    """
+    Draw a small right-facing football boot at (x, y) with given height h.
+    Returns the pixel width consumed so callers can position text after it.
+    """
+    s = h / 0.90          # scale: 0.90 norm-units = h pixels
+    pts = [(x + px * s, y + py * s) for px, py in _BOOT_PTS]
+    draw.polygon(pts, fill=NEON_GREEN)
+
+    # Stud row just below the sole
+    stud_r = max(1.5, s * 0.055)
+    stud_y = y + 0.93 * s
+    for sx_f in _STUD_XS:
+        cx = x + sx_f * s
+        draw.ellipse([cx - stud_r, stud_y - stud_r,
+                      cx + stud_r, stud_y + stud_r], fill=NEON_GREEN)
+
+    return int(s * 1.05) + 2   # total width consumed (incl. studs + tiny gap)
+
 
 # ---------------------------------------------------------------------------
 # Font loader
@@ -174,6 +218,17 @@ def create_post(
         draw_ph = ImageDraw.Draw(canvas)
         draw_ph.rectangle([(0, 0), (W, H)], fill=(15, 15, 15, 255))
 
+    # ── TOP VIGNETTE (kills source watermarks, frames the photo) ─────────────
+    # Very subtle dark-to-transparent band across the top ~18% of the card.
+    top_vign_h = int(H * 0.18)
+    top_vign   = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    tv_draw    = ImageDraw.Draw(top_vign)
+    for row in range(top_vign_h):
+        t     = 1 - (row / top_vign_h)          # 1 at top → 0 at bottom
+        alpha = int(160 * (t ** 1.6))            # 160 max (~63% opacity at top)
+        tv_draw.rectangle([(0, row), (W, row + 1)], fill=(0, 0, 0, alpha))
+    canvas = Image.alpha_composite(canvas, top_vign)
+
     # ── BOTTOM GRADIENT (0% → 72% black) ─────────────────────────────────────
     grad_start = int(H * GRADIENT_START_FRAC)
     grad_h     = H - grad_start
@@ -192,13 +247,17 @@ def create_post(
     pad_x  = 52
     pad_y  = 48
 
-    # ── TOP-LEFT: "FOOTY CULTURE" WORDMARK ───────────────────────────────────
-    wm_font = _font(28, "ui")
-    wm_col  = (255, 255, 255, 204)   # white 80% opacity
-    # PIL doesn't support per-pixel alpha on draw.text directly — use a layer
+    # ── TOP-LEFT: small green boot icon + "FOOTY CULTURE" wordmark ───────────
     wm_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     wm_draw  = ImageDraw.Draw(wm_layer)
-    wm_draw.text((pad_x, pad_y), "FOOTY CULTURE", font=wm_font, fill=wm_col)
+
+    boot_h    = 22                                          # icon height px
+    boot_w    = _draw_boot_icon(wm_draw, pad_x, pad_y + 4, boot_h)
+    wm_font   = _font(26, "ui")
+    wm_col    = (255, 255, 255, 204)                        # white 80%
+    wm_draw.text((pad_x + boot_w + 8, pad_y), "FOOTY CULTURE",
+                 font=wm_font, fill=wm_col)
+
     canvas = Image.alpha_composite(canvas, wm_layer)
     draw = ImageDraw.Draw(canvas)
 
