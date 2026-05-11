@@ -865,20 +865,60 @@ def search_google_image(query: str) -> "bytes | None":
 # 5b. Pexels fallback
 # ---------------------------------------------------------------------------
 
-def search_pexels_image(query: str) -> "bytes | None":
+def _story_content_type(title: str) -> str:
+    """Return 'boot', 'kit', or 'general' based on title keywords."""
+    t = title.lower()
+    if any(w in t for w in ["boot", "boots", "cleat", "cleats"]):
+        return "boot"
+    if any(w in t for w in ["kit", "jersey", "shirt", "strip", "jacket", "tracksuit"]):
+        return "kit"
+    return "general"
+
+
+def _build_search_query(title: str) -> str:
     """
-    Search Pexels for a portrait photo.
-    Returns raw image bytes or None.
+    Build an accurate Pexels/Google search query from the story title.
+    - Strips year ranges (26-27, 2026-27) that search engines won't find
+    - Uses 'football kit' for kit stories, 'football boots' for boot stories
+    - Extracts the most meaningful terms (brand + specific item)
+    """
+    # Remove year ranges like "26-27", "2025-26", "2026"
+    clean = re.sub(r'\b20\d{2}[-–]\d{2,4}\b', '', title)
+    clean = re.sub(r'\b\d{2}-\d{2}\b', '', clean)
+    # Remove boilerplate suffixes
+    clean = re.sub(r'\s*[|—–-]\s*(footy headlines?|footyheadlines\.com).*$', '', clean, flags=re.IGNORECASE)
+    # Remove common filler words
+    clean = re.sub(r'\b(home|away|third|fourth|alternate|pre-match|training|launch|pictures?|info|design)\b',
+                   '', clean, flags=re.IGNORECASE)
+    clean = re.sub(r'\s+', ' ', clean).strip()
+
+    content_type = _story_content_type(title)
+    if content_type == "boot":
+        suffix = "football boots"
+    elif content_type == "kit":
+        suffix = "football kit"
+    else:
+        suffix = "football"
+
+    # Take first ~4 meaningful words + suffix
+    words = [w for w in clean.split() if len(w) > 2][:4]
+    return " ".join(words) + " " + suffix if words else suffix
+
+
+def search_pexels_images(query: str, n: int = 4) -> "list[bytes]":
+    """
+    Search Pexels for up to n portrait photos.
+    Returns list of raw image bytes (all successfully downloaded).
     """
     if not PEXELS_API_KEY:
         log.warning("PEXELS_API_KEY not set — skipping Pexels search.")
-        return None
+        return []
 
-    log.info("Pexels fallback search: %r", query)
+    log.info("Pexels search (want %d): %r", n, query)
     try:
         resp = requests.get(
             "https://api.pexels.com/v1/search",
-            params={"query": query, "per_page": 10, "orientation": "portrait"},
+            params={"query": query, "per_page": min(n * 3, 20), "orientation": "portrait"},
             headers={"Authorization": PEXELS_API_KEY},
             timeout=15,
         )
@@ -886,125 +926,171 @@ def search_pexels_image(query: str) -> "bytes | None":
         data = resp.json()
     except Exception as exc:
         log.warning("Pexels search failed: %s", exc)
-        return None
+        return []
 
-    photos = data.get("photos", [])
-    if not photos:
-        log.info("Pexels returned 0 results for %r.", query)
-        return None
-
-    for photo in photos:
+    results: list[bytes] = []
+    for photo in data.get("photos", []):
+        if len(results) >= n:
+            break
         img_url = photo.get("src", {}).get("large2x") or photo.get("src", {}).get("large")
         if not img_url:
             continue
-        log.info("Trying Pexels image: %s", img_url)
         img_bytes = _download_image(img_url)
-        if img_bytes and _is_portrait(img_bytes):
-            log.info("Portrait image found via Pexels: %s", img_url)
-            return img_bytes
+        if img_bytes:
+            results.append(img_bytes)
+            log.info("Pexels image %d/%d: %s", len(results), n, img_url[:80])
 
-    return None
+    log.info("Pexels returned %d images for %r", len(results), query)
+    return results
 
 
-def find_image(title: str, preferred_url: "str | None" = None) -> "bytes | None":
+# Keep single-image wrappers for backward compat
+def search_pexels_image(query: str) -> "bytes | None":
+    results = search_pexels_images(query, n=1)
+    return results[0] if results else None
+
+
+def find_images(
+    title: str,
+    preferred_url: "str | None" = None,
+    n: int = 3,
+) -> "list[bytes]":
     """
-    Image search with priority order:
-      1. preferred_url  — direct image from the tweet / RSS feed (most relevant)
-      2. Google Custom Search
-      3. Pexels
-      4. Generic fallback query
+    Find up to n images that accurately match the story.
 
-    preferred_url is passed for stories that carry a tweet_image / feed_image.
+    Priority:
+      1. preferred_url (tweet/RSS attached image) — use as slide 1 if available
+      2. Pexels search with a fact-checked query (kit → kit photos, boot → boot photos)
+      3. Google Custom Search
+      4. Generic fallback
+
+    The query is built from the title with year ranges stripped so we don't
+    search for '26-27 kits' (Pexels has no future kits) and instead search
+    for the actual brand/item.
     """
-    # ── Priority: use the image that came with the story ─────────────────────
+    collected: list[bytes] = []
+
+    # ── Slide 1: use story's own image if available (most accurate) ──────────
     if preferred_url:
         log.info("Trying preferred (tweet/RSS) image: %s", preferred_url)
         img = _download_image(preferred_url)
         if img and len(img) > 5000:
-            log.info("Using preferred image (%d bytes).", len(img))
-            return img
-        log.debug("Preferred image unavailable — falling back to search.")
+            collected.append(img)
+            log.info("Preferred image added as slide 1.")
 
-    base_query = re.sub(r"\s*[|—–-].*$", "", title).strip()
-    query = f"{base_query} football boot"
+    # ── Build fact-checked search query ──────────────────────────────────────
+    query = _build_search_query(title)
+    log.info("Fact-checked search query: %r  (content type: %s)",
+             query, _story_content_type(title))
 
-    img = search_google_image(query)
-    if img:
-        return img
+    # ── Google for first specific image ──────────────────────────────────────
+    if len(collected) < n and GOOGLE_API_KEY:
+        img = search_google_image(query)
+        if img:
+            collected.append(img)
 
-    img = search_pexels_image(query)
-    if img:
-        return img
+    # ── Pexels for remaining slides ───────────────────────────────────────────
+    still_need = n - len(collected)
+    if still_need > 0:
+        pexels_imgs = search_pexels_images(query, n=still_need + 1)
+        for img in pexels_imgs:
+            if len(collected) >= n:
+                break
+            collected.append(img)
 
-    # Last resort: generic "football boot" to at least have an image
-    log.warning("No specific image found. Trying generic 'football boot' query.")
-    img = search_google_image("football boot new release")
-    if img:
-        return img
-    img = search_pexels_image("football boot")
-    return img
+    # ── Fallback to generic if still empty ───────────────────────────────────
+    if not collected:
+        content_type = _story_content_type(title)
+        fallback = "football boots on pitch" if content_type == "boot" else "football kit player"
+        log.warning("No specific images found — trying generic fallback: %r", fallback)
+        fallback_imgs = search_pexels_images(fallback, n=n)
+        collected.extend(fallback_imgs)
+
+    log.info("Total images collected for carousel: %d", len(collected))
+    return collected[:n]
+
+
+# Keep single-image wrapper for backward compat
+def find_image(title: str, preferred_url: "str | None" = None) -> "bytes | None":
+    imgs = find_images(title, preferred_url=preferred_url, n=1)
+    return imgs[0] if imgs else None
 
 
 # ---------------------------------------------------------------------------
 # 6. Generate post image
 # ---------------------------------------------------------------------------
 
-def card_subtext(tag: str) -> str:
-    """
-    Short clean line shown on the image card below the headline.
-    No emojis — must survive any font/encoding on the card renderer.
-    """
-    return {
-        "LEAKED":   "Leaked — unreleased design surfacing early.",
-        "SPOTTED":  "Spotted on feet before the official reveal.",
-        "BREAKING": "Official confirmation just dropped.",
-        "DROPPED":  "Available now — the wait is over.",
-        "NEWS":     "Latest from the world of football boots & kits.",
-    }.get(tag, "Football boot & kit news.")
-
-
-def generate_post_image(
+def generate_carousel(
     headline: str,
-    ig_caption: str,
-    image_path: "str | None",
     tag: str,
-) -> "str | None":
+    image_bytes_list: "list[bytes]",
+) -> "list[str]":
     """
-    Calls create_post.create_post() and returns the output PNG path.
-    ig_caption is the full Instagram caption (emojis + hashtags) — it is
-    printed to the terminal by create_post for reference but NOT rendered
-    on the card.  card_subtext() provides the clean on-card sub-line.
-    Returns None on failure.
+    Generate a carousel of 2–4 post card images.
+
+    Slide 1  — full branded card: tag badge + headline + handle
+    Slide 2+ — secondary cards: different background, just handle + strip
+                (lets the photos speak — different angle/shot of the same item)
+
+    Returns list of file paths (at least 1, up to len(image_bytes_list)).
     """
+    sys.path.insert(0, str(SCRIPT_DIR))
     try:
-        # Import here so pipeline errors don't propagate during import
-        sys.path.insert(0, str(SCRIPT_DIR))
         from create_post import create_post  # noqa: PLC0415
-
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        out_path = str(OUTPUT_DIR / f"post_{ts}.png")
-
-        create_post(
-            headline=headline,
-            caption=card_subtext(tag),   # clean on-card sub-line, no emojis
-            image_path=image_path,
-            tag=tag,
-            size="portrait",
-            output_path=out_path,
-            focal_point="center",
-            fit=False,
-        )
-        return out_path
     except Exception as exc:
-        log.error("create_post failed: %s", exc, exc_info=True)
-        return None
+        log.error("Could not import create_post: %s", exc)
+        return []
+
+    if not image_bytes_list:
+        # No images — generate one card with a dark placeholder
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        out = str(OUTPUT_DIR / f"post_{ts}_s1.png")
+        try:
+            create_post(headline=headline, tag=tag, size="portrait",
+                        output_path=out, slide_num=1)
+            return [out]
+        except Exception as exc:
+            log.error("Placeholder card failed: %s", exc)
+            return []
+
+    paths: list[str] = []
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    for i, img_bytes in enumerate(image_bytes_list, start=1):
+        # Save image bytes to a temp file
+        tmp_path = str(OUTPUT_DIR / f"_tmp_bg_{ts}_{i}.jpg")
+        with open(tmp_path, "wb") as f:
+            f.write(img_bytes)
+
+        out_path = str(OUTPUT_DIR / f"post_{ts}_s{i}.png")
+        try:
+            create_post(
+                headline=headline,
+                tag=tag,
+                image_path=tmp_path,
+                size="portrait",
+                output_path=out_path,
+                focal_point="center",
+                slide_num=i,           # 1 = full card, 2+ = minimal
+            )
+            paths.append(out_path)
+            log.info("Generated slide %d: %s", i, out_path)
+        except Exception as exc:
+            log.error("Slide %d generation failed: %s", i, exc, exc_info=True)
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+
+    return paths
 
 
 # ---------------------------------------------------------------------------
 # 7. Post to Instagram via instagrapi
 # ---------------------------------------------------------------------------
 
-def post_to_instagram(image_path: str, caption: str) -> bool:
+def post_to_instagram(image_paths: "list[str] | str", caption: str) -> bool:
     """
     Post image directly to Instagram using instagrapi.
 
@@ -1078,49 +1164,42 @@ def post_to_instagram(image_path: str, caption: str) -> bool:
     except Exception as exc:
         log.warning("Could not save session: %s", exc)
 
-    # ── Prepare image: convert PNG → JPEG (Instagram requirement) ───────────
-    # create_post.py now generates directly at 1080×1350 (4:5), so NO crop
-    # is needed here. We just convert to JPEG at high quality.
+    # ── Convert all PNG slides to JPEG (Instagram requirement) ───────────────
     import tempfile as _tmpfile
     from PIL import Image as _Image
+    from pathlib import Path as _Path
 
-    upload_path = image_path
-    _tmp_jpeg = None
-    try:
-        with _Image.open(image_path) as img:
-            w, h = img.size
-            log.info("Card size: %dx%d", w, h)
+    if isinstance(image_paths, str):
+        image_paths = [image_paths]
 
-            # Safety net: if somehow the card is still taller than 4:5, crop
-            # from the BOTTOM only (preserves the top — where subjects' faces are)
-            max_h = int(w * 5 / 4)
-            if h > max_h:
-                img = img.crop((0, 0, w, max_h))
-                log.info("Safety crop applied: %dx%d → %dx%d", w, h, w, max_h)
+    jpeg_paths: list[str] = []
+    tmp_jpegs:  list[str] = []
+    for png_path in image_paths:
+        try:
+            with _Image.open(png_path) as img:
+                w, h = img.size
+                # Safety net: crop from bottom if taller than 4:5
+                max_h = int(w * 5 / 4)
+                if h > max_h:
+                    img = img.crop((0, 0, w, max_h))
+                _tmp_fd, _tmp_path = _tmpfile.mkstemp(suffix=".jpg", dir=str(OUTPUT_DIR))
+                import os as _os; _os.close(_tmp_fd)
+                img.convert("RGB").save(_tmp_path, "JPEG", quality=95)
+                jpeg_paths.append(_tmp_path)
+                tmp_jpegs.append(_tmp_path)
+        except Exception as exc:
+            log.warning("JPEG conversion failed for %s: %s — using original", png_path, exc)
+            jpeg_paths.append(png_path)
 
-            # Convert to JPEG
-            _tmp_fd, _tmp_path = _tmpfile.mkstemp(suffix=".jpg",
-                                                   dir=str(OUTPUT_DIR))
-            import os as _os; _os.close(_tmp_fd)
-            img.convert("RGB").save(_tmp_path, "JPEG", quality=95)
-            upload_path = _tmp_path
-            _tmp_jpeg = _tmp_path
-            log.info("Converted to JPEG for upload: %s", upload_path)
-    except Exception as exc:
-        log.warning("Image prep failed (%s) — uploading original PNG", exc)
+    log.info("Prepared %d JPEG slide(s) for upload.", len(jpeg_paths))
 
-    # ── Monkey-patch instagrapi for Instagram's updated configure response ────
-    # As of 2025, /api/v1/media/configure/ returns {"status":"ok"} with no
-    # media payload.  Patch _extract_configured_media_or_raise to detect this
-    # and fetch the freshly-uploaded media via user_medias instead.
+    # ── Monkey-patch for Instagram's updated configure response ──────────────
     from instagrapi.mixins import media as _media_mixin  # noqa: PLC0415
-
     _original_extract = _media_mixin.MediaMixin._extract_configured_media_or_raise
 
     def _patched_extract(self, configured, exception_cls, context):
         last = self.last_json if isinstance(self.last_json, dict) else {}
         cfg  = configured    if isinstance(configured,    dict) else {}
-        # Success path: status ok but no media key → fetch the latest post
         if last.get("status") == "ok" or cfg.get("status") == "ok":
             import time as _t; _t.sleep(2)
             try:
@@ -1130,39 +1209,50 @@ def post_to_instagram(image_path: str, caption: str) -> bool:
                     return medias[0]
             except Exception as _fe:
                 log.warning("Could not fetch latest media: %s", _fe)
-            # Return a minimal stub so the pipeline can mark the story posted
-            from instagrapi.types import Media as _Media  # noqa: PLC0415
+            from instagrapi.types import Media as _Media
             return _Media(pk="0", id="0", code="", media_type=1,
                          taken_at=__import__("datetime").datetime.now())
         return _original_extract(self, configured, exception_cls, context)
 
     _media_mixin.MediaMixin._extract_configured_media_or_raise = _patched_extract
 
-    # Upload the post
-    log.info("Uploading photo to Instagram …")
+    # ── Upload ────────────────────────────────────────────────────────────────
+    import time as _time
+    _time.sleep(1)
+
+    def _cleanup():
+        for p in tmp_jpegs:
+            try:
+                _os.unlink(p)
+            except Exception:
+                pass
+
     try:
-        import time as _time
-        _time.sleep(1)
-        media = cl.photo_upload(
-            path=upload_path,
-            caption=caption,
-            extra_data={"custom_accessibility_caption": "", "like_and_view_counts_disabled": 0},
-        )
+        if len(jpeg_paths) == 1:
+            log.info("Uploading single photo …")
+            media = cl.photo_upload(
+                path=jpeg_paths[0],
+                caption=caption,
+                extra_data={"custom_accessibility_caption": "", "like_and_view_counts_disabled": 0},
+            )
+        else:
+            log.info("Uploading carousel (%d slides) …", len(jpeg_paths))
+            media = cl.album_upload(
+                paths=jpeg_paths,
+                caption=caption,
+            )
+
         if media.code:
             log.info("Posted! Media ID: %s  URL: https://www.instagram.com/p/%s/",
                      media.pk, media.code)
         else:
             log.info("Posted! (media details unavailable — check @footyculturehq)")
-        if _tmp_jpeg:
-            import os as _os2; _os2.unlink(_tmp_jpeg)
+        _cleanup()
         return True
+
     except Exception as exc:
-        log.error("Instagram photo upload failed: %s", exc, exc_info=True)
-        if _tmp_jpeg:
-            try:
-                import os as _os3; _os3.unlink(_tmp_jpeg)
-            except Exception:
-                pass
+        log.error("Instagram upload failed: %s", exc, exc_info=True)
+        _cleanup()
         return False
 
 
@@ -1284,48 +1374,29 @@ def main() -> None:
     log.info("Tag: %s | Headline: %r", tag, headline)
     log.info("Caption: %s", caption)
 
-    # ── Find image ────────────────────────────────────────────────────────────
-    # Pass tweet_image / feed_image as the preferred URL so we use the actual
-    # boot/kit photo attached to the tweet or RSS entry before falling back to
-    # Google / Pexels searches.
+    # ── Find images (3 for carousel) ─────────────────────────────────────────
+    # Uses fact-checked query (kit story → kit images, boot story → boot images)
+    # Slide 1 uses story's own tweet/RSS image if available (most accurate source)
     preferred_img_url: "str | None" = story.get("tweet_image")
-    img_bytes = find_image(story["title"], preferred_url=preferred_img_url)
-    tmp_img_path: "str | None" = None
+    images_bytes = find_images(story["title"], preferred_url=preferred_img_url, n=3)
 
-    if img_bytes:
-        # Save to a temp file that create_post.py can open
-        with tempfile.NamedTemporaryFile(
-            suffix=".jpg", delete=False, dir=str(OUTPUT_DIR)
-        ) as tmp:
-            tmp.write(img_bytes)
-            tmp_img_path = tmp.name
-        log.info("Downloaded image saved to: %s", tmp_img_path)
-    else:
-        log.warning("No image found — will generate post with no background photo.")
+    if not images_bytes:
+        log.warning("No images found — will generate cards with dark placeholder.")
 
-    # ── Generate post card ────────────────────────────────────────────────────
-    post_path = generate_post_image(headline, caption, tmp_img_path, tag)
-    # Note: `caption` is the full Instagram caption (emojis + hashtags + CTA).
-    # generate_post_image passes card_subtext(tag) to the card renderer instead.
+    # ── Generate carousel (2-3 slides) ───────────────────────────────────────
+    slide_paths = generate_carousel(headline, tag, images_bytes)
 
-    # Clean up temp image
-    if tmp_img_path and os.path.exists(tmp_img_path):
-        try:
-            os.unlink(tmp_img_path)
-        except Exception:
-            pass
-
-    if not post_path:
-        log.error("Image generation failed. Aborting.")
+    if not slide_paths:
+        log.error("Card generation failed. Aborting.")
         return
 
-    log.info("Post image: %s", post_path)
+    log.info("Generated %d slide(s): %s", len(slide_paths), slide_paths)
 
-    # ── Post to Instagram directly ────────────────────────────────────────────
+    # ── Post to Instagram ─────────────────────────────────────────────────────
     if not INSTAGRAM_USERNAME or not INSTAGRAM_PASSWORD:
         log.warning("INSTAGRAM_USERNAME/PASSWORD not set — skipping Instagram post.")
     else:
-        success = post_to_instagram(post_path, caption)
+        success = post_to_instagram(slide_paths, caption)
         if not success:
             log.error("Instagram post failed. Not marking story as posted.")
             return
