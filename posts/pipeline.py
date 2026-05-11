@@ -207,7 +207,7 @@ def scrape_stories(max_age_days: int = MAX_AGE_DAYS) -> list[dict]:
 
     log.info("Candidate blocks found: %d", len(candidates))
 
-    for block in candidates:
+    for position, block in enumerate(candidates):
         # ── Link & Title ─────────────────────────────────────────────────────
         link_tag = block.select_one("a.post-feed__item-link") or block.find("a", href=True)
         if not link_tag:
@@ -218,6 +218,12 @@ def scrape_stories(max_age_days: int = MAX_AGE_DAYS) -> list[dict]:
             continue
         if not href.startswith("http"):
             href = FOOTY_HEADLINES_URL.rstrip("/") + "/" + href.lstrip("/")
+
+        # ── Only include actual footyheadlines.com articles ───────────────────
+        # Partner/sponsored links redirect to external domains — skip them.
+        if "footyheadlines.com" not in href:
+            log.debug("Skipping off-domain link: %s", href)
+            continue
 
         # Prefer the dedicated headline element; fall back to any hX or link text
         headline_tag = block.select_one("h2.post-feed__item-headline")
@@ -236,32 +242,43 @@ def scrape_stories(max_age_days: int = MAX_AGE_DAYS) -> list[dict]:
         if not title or len(title) < 10:
             continue
 
-        # ── Date — parsed from URL path /YYYY/MM/slug.html ───────────────────
+        # ── Quality gate: skip evergreen/archive titles ───────────────────────
+        # These are listicles, guides, and archive pages — not breaking news.
+        _junk_patterns = [
+            r"\barchive\b", r"\bhistory\b", r"\bbest boots of\b",
+            r"\bguide to\b", r"\bhow to\b", r"\ball time\b",
+            r"\btop \d+\b", r"\bevery boot\b", r"\bcomplete list\b",
+        ]
+        title_l = title.lower()
+        if any(re.search(p, title_l) for p in _junk_patterns):
+            log.debug("Skipping evergreen/archive title: %r", title)
+            continue
+
+        # ── Date ─────────────────────────────────────────────────────────────
+        # footyheadlines URLs give YYYY/MM only — no day.
+        # Instead of using the 1st of the month (which would make a May story
+        # look 10 days old on May 11th), we use page *position* as a freshness
+        # proxy: the homepage is sorted newest-first, so position 0 is today.
+        # We give each position ~0.4 days of age (so first 3 slots = age 0,
+        # slots 4-7 = age 1, etc.) and cap at MAX_AGE_DAYS.
         story_date: datetime | None = None
 
-        url_date_m = re.search(r"/(\d{4})/(\d{2})/", href)
-        if url_date_m:
+        # Try an explicit <time datetime="…"> element first (most accurate)
+        time_tag = block.find("time")
+        if time_tag and time_tag.get("datetime"):
             try:
-                y, mo = int(url_date_m.group(1)), int(url_date_m.group(2))
-                story_date = datetime(y, mo, 1, tzinfo=timezone.utc)
+                raw = time_tag["datetime"][:19]
+                story_date = datetime.fromisoformat(raw).replace(tzinfo=timezone.utc)
             except Exception:
                 pass
 
-        # Also try any <time datetime="…"> inside the block (future-proofing)
-        if story_date is None:
-            time_tag = block.find("time")
-            if time_tag and time_tag.get("datetime"):
-                try:
-                    raw = time_tag["datetime"][:19]
-                    story_date = datetime.fromisoformat(raw).replace(tzinfo=timezone.utc)
-                except Exception:
-                    pass
+        if story_date is not None:
+            age_days = (now - story_date).days
+        else:
+            # No exact date — use position: top of page = freshest
+            # positions 0-2 → age 0, 3-5 → age 1, 6-8 → age 2, etc.
+            age_days = position // 3
 
-        # If we still have no date, assume it's recent (today) to not miss content
-        if story_date is None:
-            story_date = now
-
-        age_days = (now - story_date).days
         if age_days > max_age_days:
             continue  # too old
 
@@ -270,7 +287,7 @@ def scrape_stories(max_age_days: int = MAX_AGE_DAYS) -> list[dict]:
             "id": sid,
             "title": title,
             "url": href,
-            "date": story_date.isoformat(),
+            "date": (story_date or now).isoformat(),
             "age_days": age_days,
         })
 
@@ -341,6 +358,21 @@ def scrape_nitter(max_age_days: int = MAX_AGE_DAYS) -> list[dict]:
 
                 # Must mention boots/kits to be relevant
                 if not any(kw in full_l for kw in BOOT_TWEET_KEYWORDS):
+                    continue
+
+                # Quality gate: needs at least one *action* word (not just a brand name)
+                # so "Just posted an adidas ad" doesn't sneak through
+                _action_words = [
+                    "spotted", "leaked", "leak", "exclusive", "first look",
+                    "unreleased", "prototype", "sample", "rumoured", "rumored",
+                    "training", "warm-up", "warmup", "match worn", "worn by",
+                    "wearing", "revealed", "reveal", "drop", "release",
+                    "confirmed", "breaking", "colourway", "colorway",
+                    "coming soon", "player edition", "new boot", "new kit",
+                    "new jersey", "new shirt", "new cleat",
+                ]
+                if not any(aw in full_l for aw in _action_words):
+                    log.debug("Tweet lacks action word — skipping: %r", clean[:60])
                     continue
 
                 # ── Date ──────────────────────────────────────────────────
@@ -423,6 +455,21 @@ def scrape_rss_feeds(max_age_days: int = MAX_AGE_DAYS) -> list[dict]:
             for entry in feed.entries[:20]:
                 title = entry.get("title", "").strip()
                 if not title or len(title) < 10:
+                    continue
+
+                # Quality gate: title must contain at least one action/news word
+                title_l = title.lower()
+                _rss_action_words = [
+                    "spotted", "leaked", "leak", "exclusive", "first look",
+                    "unreleased", "prototype", "sample", "rumoured", "rumored",
+                    "training", "warm-up", "match worn", "worn by", "revealed",
+                    "reveal", "drop", "release", "confirmed", "breaking",
+                    "colourway", "colorway", "new boot", "new kit", "new shirt",
+                    "new jersey", "new cleat", "launch", "announced", "dropped",
+                    "player edition", "limited edition", "coming soon",
+                ]
+                if not any(aw in title_l for aw in _rss_action_words):
+                    log.debug("RSS title lacks news action — skipping: %r", title[:60])
                     continue
 
                 published = entry.get("published_parsed")
