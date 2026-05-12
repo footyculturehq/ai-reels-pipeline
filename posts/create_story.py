@@ -1,16 +1,16 @@
 """
-create_story.py — Instagram Story card generator with poll overlay.
+create_story.py — Instagram Story card generator (clean image for native poll sticker).
 
 Generates a 1080×1920 (9:16) Story card:
   - Full-bleed blurred + darkened feed post image as background
   - Scaled feed post image (88% width) with rounded corners + drop shadow,
-    placed in the upper portion of the frame
+    centred in the frame
   - Short hook text above the post image (e.g. "COP OR DROP?")
-  - Styled poll card below the image: question + two colour-coded option buttons
   - @footyculturehq handle at the bottom
 
-The poll overlay is fully rendered — no native IG sticker API needed.
-Use the output JPEG as-is for a photo Story post (instagrapi photo_upload_to_story).
+NO poll overlay is drawn — the interactive Instagram poll sticker is attached
+by instagrapi when uploading (polls: [StoryPoll(...)]).  This lets users actually
+tap the poll buttons on Stories rather than just looking at a picture of buttons.
 
 Usage:
     from create_story import create_story, generate_poll, pick_hook
@@ -20,9 +20,8 @@ Usage:
     path = create_story(
         post_image_path="output/post_xxx.jpg",
         hook=hook,
-        poll_question=poll["question"],
-        poll_options=poll["options"],
     )
+    # pass poll["question"] and poll["options"] to post_story_to_instagram() instead
 """
 
 import hashlib
@@ -238,26 +237,27 @@ def pick_hook(category: str) -> str:
 def create_story(
     post_image_path: str,
     hook: str,
-    poll_question: str,
-    poll_options: list,
     output_path: str = None,
+    # Legacy params kept for backward compat — ignored (poll is now an IG sticker)
+    poll_question: str = None,
+    poll_options: list = None,
 ) -> str:
     """
-    Render a 1080×1920 Story card.
+    Render a clean 1080×1920 Story background image.
 
     Layout (top→bottom):
-      280px   hook text (e.g. "COP OR DROP?")
-      ~680px  feed post image at 88% width, rounded corners, drop shadow
-       40px   gap
-      260px   poll card: question + two colour-coded option buttons
-       …      spacer
-      100px   handle
+      ~200px   hook text (e.g. "COP OR DROP?")
+      ~centre  feed post card at 88% width, rounded corners + drop shadow
+      bottom   @footyculturehq handle
+
+    No poll overlay is drawn here — the interactive Instagram poll sticker is
+    attached by instagrapi at upload time (pass polls=[StoryPoll(...)]).
 
     Returns the path to the saved JPEG Story image.
     """
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # ── Load and crop feed post image ─────────────────────────────────────────
+    # ── Load feed post image ──────────────────────────────────────────────────
     feed_img = Image.open(post_image_path).convert("RGB")
 
     # ── Background: full-bleed blur + heavy darken ────────────────────────────
@@ -272,111 +272,38 @@ def create_story(
     oy = (new_h - STORY_H) // 2
     bg = bg.crop((ox, oy, ox + STORY_W, oy + STORY_H))
     bg = bg.filter(ImageFilter.GaussianBlur(radius=80))
-    bg = ImageEnhance.Brightness(bg).enhance(0.26)   # very dark — content pops
-
+    bg = ImageEnhance.Brightness(bg).enhance(0.26)
     canvas = bg.convert("RGBA")
 
-    # ── Feed post image: rounded corners + drop shadow ────────────────────────
-    post_w  = int(STORY_W * 0.88)
-    post_h  = int(post_w * feed_img.height / feed_img.width)
+    # ── Feed post card: rounded corners + drop shadow, centred vertically ─────
+    post_w        = int(STORY_W * 0.88)
+    post_h        = int(post_w * feed_img.height / feed_img.width)
     post_scaled   = feed_img.resize((post_w, post_h), Image.LANCZOS)
     post_rounded  = _add_rounded_corners(post_scaled, radius=28)
-    post_shadowed = _add_drop_shadow(post_rounded, offset=(0, 20), blur=32, opacity=0.50)
+    post_shadowed = _add_drop_shadow(post_rounded, offset=(0, 20), blur=32, opacity=0.55)
 
-    # Padding for the drop shadow layer
-    shadow_pad = 32 * 2                            # blur * 2 in _add_drop_shadow
-    hook_area  = 240                               # pixels reserved above image for hook
+    hook_area    = 220     # px above image reserved for hook text
     post_paste_x = (STORY_W - post_shadowed.width) // 2
     post_paste_y = hook_area
     canvas.paste(post_shadowed, (post_paste_x, post_paste_y), post_shadowed)
 
-    # ── Hook text ─────────────────────────────────────────────────────────────
+    # ── Hook text (large, centred, white with shadow) ─────────────────────────
     draw      = ImageDraw.Draw(canvas)
-    hook_font = _sfont(76, "headline")
+    hook_font = _sfont(80, "headline")
     hook_str  = hook.upper()
     hook_w    = _tw(draw, hook_str, hook_font)
     hook_x    = (STORY_W - hook_w) // 2
     hook_y    = 80
-    # Text shadow for legibility
-    draw.text((hook_x + 3, hook_y + 3), hook_str, font=hook_font,
-              fill=(0, 0, 0, 170))
-    draw.text((hook_x,     hook_y),     hook_str, font=hook_font,
-              fill=(255, 255, 255, 255))
+    for dx, dy, alpha in [(3, 3, 160), (0, 0, 255)]:
+        col = (0, 0, 0, alpha) if dx else (255, 255, 255, 255)
+        draw.text((hook_x + dx, hook_y + dy), hook_str, font=hook_font, fill=col)
 
-    # ── Poll card ─────────────────────────────────────────────────────────────
-    poll_card_top = post_paste_y + post_shadowed.height + 38
-    poll_card_h   = 260
-    poll_card_w   = int(STORY_W * 0.88)
-    poll_card_x   = (STORY_W - poll_card_w) // 2
-
-    poll_layer = Image.new("RGBA", (STORY_W, STORY_H), (0, 0, 0, 0))
-    pd         = ImageDraw.Draw(poll_layer)
-
-    # Card background: white, semi-transparent, rounded
-    pd.rounded_rectangle(
-        [(poll_card_x, poll_card_top),
-         (poll_card_x + poll_card_w, poll_card_top + poll_card_h)],
-        radius=22, fill=(255, 255, 255, 228),
-    )
-
-    # Poll question (black text, max 2 lines)
-    q_font  = _sfont(40, "ui")
-    q_text  = poll_question.upper()
-    q_max_w = poll_card_w - 48
-    words   = q_text.split()
-    lines: list[str] = []
-    cur = ""
-    for word in words:
-        test = (cur + " " + word).strip()
-        if _tw(pd, test, q_font) <= q_max_w:
-            cur = test
-        else:
-            if cur:
-                lines.append(cur)
-            cur = word
-    if cur:
-        lines.append(cur)
-    q_lines = lines[:2]
-
-    q_y = poll_card_top + 20
-    for line in q_lines:
-        lw = _tw(pd, line, q_font)
-        pd.text(((STORY_W - lw) // 2, q_y), line, font=q_font,
-                fill=(10, 10, 10, 255))
-        q_y += int(40 * 1.2)
-
-    # Option buttons (two side-by-side, colour-coded)
-    opt_top  = poll_card_top + poll_card_h - 95
-    opt_h    = 66
-    opt_gap  = 18
-    opt_w    = (poll_card_w - opt_gap * 3) // 2
-    opt_font = _sfont(38, "ui")
-
-    BLUE   = (41, 109, 247, 255)   # option A
-    ORANGE = (255, 88, 18, 255)    # option B
-
-    for i, opt_text in enumerate(poll_options[:2]):
-        ox     = poll_card_x + opt_gap + i * (opt_w + opt_gap)
-        oy     = opt_top
-        colour = BLUE if i == 0 else ORANGE
-        pd.rounded_rectangle([(ox, oy), (ox + opt_w, oy + opt_h)],
-                              radius=14, fill=colour)
-        label = opt_text.upper()
-        tw    = _tw(pd, label, opt_font)
-        pd.text(
-            (ox + (opt_w - tw) // 2, oy + (opt_h - 38) // 2 - 2),
-            label, font=opt_font, fill=(255, 255, 255, 255),
-        )
-
-    canvas = Image.alpha_composite(canvas, poll_layer)
-
-    # ── Handle ────────────────────────────────────────────────────────────────
-    draw     = ImageDraw.Draw(canvas)
-    hdl_font = _sfont(34, "ui_light")
+    # ── @handle bottom-centre ─────────────────────────────────────────────────
+    hdl_font = _sfont(36, "ui_light")
     hdl_text = "@footyculturehq"
     hdl_w    = _tw(draw, hdl_text, hdl_font)
     draw.text(
-        ((STORY_W - hdl_w) // 2, STORY_H - 120),
+        ((STORY_W - hdl_w) // 2, STORY_H - 110),
         hdl_text, font=hdl_font, fill=(255, 255, 255, 140),
     )
 

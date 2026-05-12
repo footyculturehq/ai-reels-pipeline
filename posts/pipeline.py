@@ -2437,7 +2437,47 @@ def generate_post_image(
 
 
 # ---------------------------------------------------------------------------
-# 6b. Carousel generator (multiple branded slides, one per image)
+# 6b. Image-only slide (no text overlay — for carousel slides 2+)
+# ---------------------------------------------------------------------------
+
+def generate_image_slide(image_bytes: bytes, slide_index: int, size: str = "portrait") -> "str | None":
+    """
+    Save a clean product image as a plain JPEG slide (no text, no overlays).
+    Crops/resizes to the target canvas size and applies a subtle saturation/
+    contrast boost to match the look of the branded card.
+
+    Returns the file path or None on failure.
+    """
+    from PIL import ImageEnhance as _Enh  # noqa: PLC0415
+    ts     = datetime.now().strftime("%Y%m%d_%H%M%S")
+    suffix = f"_img{slide_index:02d}"
+    out    = str(OUTPUT_DIR / f"post_{ts}{suffix}.jpg")
+    W, H   = SIZES.get(size, SIZES["portrait"])
+    try:
+        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        # Centre-crop to target aspect ratio
+        src_ar, tgt_ar = img.width / img.height, W / H
+        if src_ar > tgt_ar:
+            nh, nw = H, int(H * src_ar)
+        else:
+            nw, nh = W, int(W / src_ar)
+        img = img.resize((nw, nh), Image.LANCZOS)
+        ox  = (nw - W) // 2
+        oy  = (nh - H) // 2
+        img = img.crop((ox, oy, ox + W, oy + H))
+        # Subtle colour boost to match branded card aesthetic
+        img = _Enh.Color(img).enhance(1.15)
+        img = _Enh.Contrast(img).enhance(1.05)
+        img.save(out, "JPEG", quality=92)
+        log.info("Image slide %d: %s", slide_index, out)
+        return out
+    except Exception as exc:
+        log.warning("Image slide %d failed: %s", slide_index, exc)
+        return None
+
+
+# ---------------------------------------------------------------------------
+# 6c. Carousel generator: slide 1 = branded card, slides 2+ = image only
 # ---------------------------------------------------------------------------
 
 def generate_carousel(
@@ -2447,27 +2487,33 @@ def generate_carousel(
     max_slides: int = 4,
 ) -> "list[str]":
     """
-    Generate one branded post card per image (up to max_slides).
-    Each card uses the same headline/category overlay on a different photo.
-    Falls back to a single dark-background placeholder card if no images.
+    Slide 1 — branded magazine cover (headline + category tag + handle overlay).
+    Slides 2-N — clean product images, no text, just the photo cropped to canvas.
 
-    Returns a list of file paths (at least 1 on success, empty on error).
+    Returns a list of file paths.  Empty list means nothing to post.
     """
     if not image_bytes_list:
-        # No clean images found — generate a single dark-branded placeholder card.
-        # A well-designed dark card with the headline is better than no post at all.
-        log.info("No images available — generating dark-branded placeholder card.")
-        path = generate_post_image(headline, category, None, slide_index=0)
-        return [path] if path else []
+        # No clean images — do NOT post. Accuracy beats frequency.
+        log.warning("No clean images available — skipping post entirely.")
+        return []
 
+    _size  = CATEGORY_SIZE.get(category.upper(), "portrait")
     paths: list[str] = []
-    for i, img_bytes in enumerate(image_bytes_list[:max_slides], start=1):
-        path = generate_post_image(headline, category, img_bytes, slide_index=i)
+
+    # Slide 1: branded card using the first (best) image
+    cover = generate_post_image(headline, category, image_bytes_list[0], slide_index=1)
+    if cover:
+        paths.append(cover)
+        log.info("Slide 1 (cover): %s", cover)
+    else:
+        log.warning("Cover slide failed — aborting carousel.")
+        return []
+
+    # Slides 2-N: raw images, no overlay
+    for i, img_bytes in enumerate(image_bytes_list[1:max_slides], start=2):
+        path = generate_image_slide(img_bytes, slide_index=i, size=_size)
         if path:
             paths.append(path)
-            log.info("Slide %d/%d: %s", i, min(len(image_bytes_list), max_slides), path)
-        else:
-            log.warning("Slide %d failed to generate — skipping.", i)
     return paths
 
 
@@ -2671,18 +2717,25 @@ def _posts_today(posted: list[dict]) -> int:
 # Instagram Story poster
 # ---------------------------------------------------------------------------
 
-def post_story_to_instagram(story_image_path: str) -> bool:
+def post_story_to_instagram(
+    story_image_path: str,
+    poll_question: "str | None" = None,
+    poll_options: "list[str] | None" = None,
+) -> bool:
     """
     Post a pre-rendered 1080×1920 Story image to Instagram Stories.
-    Reuses the saved session from INSTAGRAM_SESSION_FILE (same as feed posts).
-    Non-fatal: failures are logged but never crash the pipeline.
+    If poll_question + poll_options are supplied, attaches a real interactive
+    Instagram poll sticker (users tap directly in the Story — not a picture).
+
+    Reuses the saved session from INSTAGRAM_SESSION_FILE.  Non-fatal.
     """
     if not INSTAGRAM_SESSION_FILE.exists():
         log.warning("No session file — skipping Story post.")
         return False
 
     try:
-        from instagrapi import Client as _Client  # noqa: PLC0415
+        from instagrapi import Client as _Client          # noqa: PLC0415
+        from instagrapi.types import StoryPoll            # noqa: PLC0415
     except ImportError:
         log.error("instagrapi not installed — cannot post Story.")
         return False
@@ -2702,7 +2755,6 @@ def post_story_to_instagram(story_image_path: str) -> bool:
     tmp_path: "str | None" = None
     try:
         with Image.open(story_image_path) as _img:
-            # Ensure 9:16 aspect ratio
             sw, sh = _img.size
             ideal_h = int(sw * 16 / 9)
             if sh > ideal_h + 10:
@@ -2721,8 +2773,25 @@ def post_story_to_instagram(story_image_path: str) -> bool:
     import time as _time
     _time.sleep(5)   # brief pause after feed post
 
+    # Build real Instagram poll sticker if question + options are provided
+    polls: list = []
+    if poll_question and poll_options and len(poll_options) >= 2:
+        try:
+            poll = StoryPoll(
+                question=poll_question,
+                options=poll_options[:2],   # IG only supports 2 options
+                # Position the sticker in the lower-middle of the story
+                x=0.5, y=0.75,
+                width=0.72, height=0.12,
+                rotation=0.0,
+            )
+            polls = [poll]
+            log.info("Attaching poll sticker: %r  options=%s", poll_question, poll_options[:2])
+        except Exception as exc:
+            log.warning("Could not build StoryPoll sticker (%s) — posting without poll.", exc)
+
     try:
-        media = cl.photo_upload_to_story(path=tmp_path)
+        media = cl.photo_upload_to_story(path=tmp_path, polls=polls)
         log.info("Story posted! ID: %s", getattr(media, "pk", "?"))
         return True
     except Exception as exc:
@@ -2906,11 +2975,6 @@ def main() -> None:
     story = None
     category = hype_headline = caption = None
     images_bytes: list[bytes] = []
-    # Best-scored candidate seen so far (used as dark-placeholder fallback)
-    _best_no_img_cand:    "dict | None" = None
-    _best_no_img_cat:     str           = "FOOTBALL"
-    _best_no_img_hype:    str           = ""
-    _best_no_img_caption: str           = ""
 
     for attempt, cand in enumerate(candidates, start=1):
         log.info(
@@ -2942,28 +3006,10 @@ def main() -> None:
                 "  → No qualifying images for %r — trying next candidate.",
                 cand["title"][:60]
             )
-            # Remember the highest-scored candidate (first one seen) as fallback
-            if _best_no_img_cand is None:
-                _best_no_img_cand    = cand
-                _best_no_img_cat     = _cat
-                _best_no_img_hype    = _hype
-                _best_no_img_caption = _caption
 
     if story is None:
-        # No candidate had a clean image — fall back to a dark-branded placeholder
-        # card for the best-scored story.  Better than posting nothing on a big news day.
-        if _best_no_img_cand is None:
-            log.warning("All candidates exhausted with no qualifying images. Nothing to post.")
-            return
-        log.warning(
-            "All candidates had no clean images. Falling back to dark placeholder for: %r",
-            _best_no_img_cand["title"][:60],
-        )
-        story        = _best_no_img_cand
-        category     = _best_no_img_cat
-        hype_headline = _best_no_img_hype
-        caption      = _best_no_img_caption
-        images_bytes = []   # generate_carousel handles empty list → placeholder
+        log.warning("All candidates exhausted with no qualifying images. Nothing to post.")
+        return
 
     log.info("Category: %s", category)
     log.info("Headline (hype): %r", hype_headline)
@@ -3006,16 +3052,19 @@ def main() -> None:
                 "club":   (_entities.get("club") or "").title(),
                 "model":  (_entities.get("model") or "").title(),
             }
-            _poll      = _generate_poll(category, _poll_meta)
-            _hook      = _pick_hook(category)
+            _poll       = _generate_poll(category, _poll_meta)
+            _hook       = _pick_hook(category)
             _story_path = _create_story_card(
                 post_image_path=slide_paths[0],
                 hook=_hook,
+                # poll rendered as native IG sticker — NOT drawn on image
+            )
+            log.info("Story card generated: %s", _story_path)
+            _story_ok = post_story_to_instagram(
+                _story_path,
                 poll_question=_poll["question"],
                 poll_options=_poll["options"],
             )
-            log.info("Story card generated: %s", _story_path)
-            _story_ok = post_story_to_instagram(_story_path)
             if _story_ok:
                 log.info("Story posted successfully.")
             else:
