@@ -631,92 +631,169 @@ def pick_tag(title: str) -> str:
 
 def score_story(story: dict) -> tuple[int, str]:
     """
-    Score a story 0–10 for post worthiness.
+    Score a story 0–10 for post-worthiness using tiered entity weights,
+    content-quality multipliers, hard filters, and cross-source confirmation.
 
-    Tier 1 (8-10): auto-post — big club/player, full reveal, boot launch, collab
-    Tier 2 (5-7):  queue/skip — leaks without clean image, smaller clubs
-    Tier 3 (0-4):  skip — date teasers, anthem jackets, niche products, low-res
+    Hard filters return score=0 immediately (skip regardless of entity).
+    Baseline = 2; must score ≥7 to post.
 
     Returns (score, reason_string).
     """
-    t = story["title"].lower()
-    score = 4   # baseline — below threshold; must earn its way up
-
+    t     = story["title"].lower()
+    score = 2       # baseline — well below threshold
     reasons: list[str] = []
 
-    # ── Big players — guaranteed engagement ───────────────────────────────────
-    big_players = [
-        "mbappe", "haaland", "salah", "ronaldo", "messi", "bellingham",
-        "vinicius", "saka", "kane", "de bruyne", "pedri", "yamal",
+    # ══════════════════════════════════════════════════════════════════════════
+    # HARD FILTERS — skip entirely, no matter how big the entity
+    # ══════════════════════════════════════════════════════════════════════════
+
+    # 1. Pure date tease — product not visible yet ("Coming May 15", "Dropping June")
+    if re.search(
+        r"(coming|dropping|launching|releasing|arrives?|available)\s+"
+        r"(jan|feb|mar|apr|may|june?|july?|aug|sep|oct|nov|dec|\d{1,2})",
+        t,
+    ):
+        return 0, "HARD FILTER: date tease — product not visible"
+
+    # 2. Concept / fan-made kits — not real product, never accurate image
+    if any(w in t for w in ["concept", "fan-made", "fan made", "fan kit",
+                             "concept kit", "reimagined"]):
+        return 0, "HARD FILTER: concept/fan-made"
+
+    # 3. Poll / vote / opinion articles — no product news
+    if any(w in t for w in ["voted", "vote:", "poll:", "worst kit", "best kit of",
+                             "ranked:", "ranking"]):
+        return 0, "HARD FILTER: poll/vote article"
+
+    # 4. Pure roundup / overview — usually collage, no single product
+    if re.search(r"\b(roundup|round-up|overview|all \d+ kits|every kit)\b", t):
+        return 0, "HARD FILTER: roundup/collage"
+
+    # 5. Teaser with nothing revealed — "teased" but no leaked/spotted qualifier
+    if "teased" in t and not any(w in t for w in ["leaked", "spotted", "revealed", "confirmed"]):
+        return 0, "HARD FILTER: tease with no product reveal"
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # ENTITY SCORING — tiered by audience size
+    # ══════════════════════════════════════════════════════════════════════════
+
+    # ── Clubs: Tier 1 (+5) — mass global fanbase ──────────────────────────────
+    tier1_clubs = [
+        "real madrid", "barcelona", "manchester united", "man utd",
+        "arsenal", "liverpool", "psg", "paris saint-germain",
+    ]
+    # ── Clubs: Tier 2 (+3) — big, passionate fanbases ────────────────────────
+    tier2_clubs = [
+        "manchester city", "man city", "chelsea", "tottenham", "spurs",
+        "bayern", "juventus", "ac milan", "inter milan",
+    ]
+    # ── Clubs: Tier 3 (+1) — popular but smaller reach ───────────────────────
+    tier3_clubs = [
+        "dortmund", "atletico", "atletico madrid", "napoli",
+        "roma", "lazio", "sevilla", "porto", "benfica",
+    ]
+
+    if any(c in t for c in tier1_clubs):
+        score += 5; reasons.append("tier-1 club +5")
+    elif any(c in t for c in tier2_clubs):
+        score += 3; reasons.append("tier-2 club +3")
+    elif any(c in t for c in tier3_clubs):
+        score += 1; reasons.append("tier-3 club +1")
+
+    # ── National teams (+3 always; massive audiences) ─────────────────────────
+    nat_teams = [
+        "brazil", "argentina", "france", "england", "germany",
+        "portugal", "spain", "italy", "mexico", "netherlands",
+        "usa", "japan", "south korea",
+    ]
+    if any(n in t for n in nat_teams):
+        score += 3; reasons.append("national team +3")
+
+    # ── Players: Star tier (+5) — guaranteed massive engagement ──────────────
+    star_players = [
+        "mbappe", "messi", "ronaldo", "haaland", "yamal", "bellingham",
+    ]
+    # ── Players: Top tier (+3) — big accounts, strong engagement ─────────────
+    top_players = [
+        "vinicius", "salah", "saka", "kane", "de bruyne", "pedri",
         "rashford", "neymar", "lewandowski", "son", "martinelli",
-        "pulisic", "foden", "grealish", "mount", "odegaard",
+        "pulisic", "foden", "odegaard", "grealish", "mount",
+        "osimhen", "dybala", "benzema", "modric", "kroos",
     ]
-    if any(p in t for p in big_players):
-        score += 3
-        reasons.append("big player")
 
-    # ── Big clubs — mass fanbase ───────────────────────────────────────────────
-    big_clubs = [
-        "manchester united", "man utd", "arsenal", "liverpool", "chelsea",
-        "manchester city", "man city", "tottenham", "spurs",
-        "real madrid", "barcelona", "psg", "paris saint-germain",
-        "bayern", "juventus", "ac milan", "inter milan", "dortmund",
-        "atletico madrid", "napoli",
-        "brazil", "england", "france", "germany", "argentina",
-        "portugal", "spain", "italy",
-    ]
-    if any(c in t for c in big_clubs):
-        score += 2
-        reasons.append("big club")
+    if any(p in t for p in star_players):
+        score += 5; reasons.append("star player +5")
+    elif any(p in t for p in top_players):
+        score += 3; reasons.append("top player +3")
 
-    # ── Popular boot models ────────────────────────────────────────────────────
+    # ── Brands: Top tier (+2) ─────────────────────────────────────────────────
+    if any(b in t for b in ["nike", "adidas"]):
+        score += 2; reasons.append("top brand +2")
+    elif any(b in t for b in ["puma", "new balance"]):
+        score += 1; reasons.append("mid brand +1")
+
+    # ── Boot models: Popular silo (+2) ────────────────────────────────────────
     hot_models = [
         "mercurial", "predator", "phantom", "tiempo", "superfly",
         "copa", "future", "ultra", "king", "tekela", "furon",
-        "f50", "x speedflow", "speedportal",
+        "f50", "x speedflow", "speedportal", "thrasher",
     ]
     if any(m in t for m in hot_models):
-        score += 2
-        reasons.append("hot boot model")
+        score += 2; reasons.append("hot boot model +2")
 
-    # ── Content quality signals ────────────────────────────────────────────────
-    if any(w in t for w in ["collab", "collaboration"]):
-        score += 2; reasons.append("collab")
-    if any(w in t for w in ["retro", "vault", "reissue", "og ", "classic"]):
-        score += 2; reasons.append("retro/vault")
-    if any(w in t for w in ["launch", "official", "confirmed", "released", "on sale"]):
-        score += 1; reasons.append("official")
+    # ══════════════════════════════════════════════════════════════════════════
+    # CONTENT QUALITY — bonus multipliers
+    # ══════════════════════════════════════════════════════════════════════════
+
+    if any(w in t for w in ["collab", "collaboration", " x nike", " x adidas", " x puma"]):
+        score += 4; reasons.append("player×brand collab +4")
+    if any(w in t for w in ["retro", "vault", "reissue", "og ", "classic", "archive",
+                             "remake", "throwback"]):
+        score += 3; reasons.append("retro/vault reissue +3")
     if any(w in t for w in ["leaked", "leak"]):
-        score += 1; reasons.append("leak")
+        score += 2; reasons.append("leaked before official +2")
+    if any(w in t for w in ["spotted", "training", "on feet", "worn by", "match worn"]):
+        score += 1; reasons.append("spotted on feet +1")
+    if any(w in t for w in ["confirmed", "official", "released", "launch", "on sale"]):
+        score += 1; reasons.append("official confirm +1")
 
-    # ── TIER 3 HARD PENALTIES — things nobody cares about ─────────────────────
+    # ── Cross-source confirmation (+2) ────────────────────────────────────────
+    # Set by main() when 2+ whitelisted sources cover the same story within 24h
+    if story.get("cross_source_confirmed"):
+        score += 2; reasons.append("multi-source confirmed +2")
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # PENALTIES — known low-performers
+    # ══════════════════════════════════════════════════════════════════════════
+
+    # Niche training/anthem apparel — nobody cares
     niche_items = [
         "anthem jacket", "anthem track", "anthem top", "anthem vest",
         "woven jacket", "rain jacket", "tracksuit",
-        "training shirt", "training top", "training jacket",
-        "pre-match",
+        "training shirt", "training top", "training jacket", "pre-match",
     ]
     if any(n in t for n in niche_items):
-        score -= 4; reasons.append("niche product −4")
+        score -= 4; reasons.append("niche apparel −4")
 
-    if re.search(r"(coming|teased|dropping)\s+(may|june|july|aug|\d)", t):
-        score -= 3; reasons.append("date tease only −3")
-
-    if "teased" in t and not any(w in t for w in ["leaked", "spotted"]):
-        score -= 2; reasons.append("tease not reveal −2")
-
+    # Obscure clubs — small audience
     obscure_clubs = [
         "palermo", "galatasaray", "lyon", "burnley", "nottingham",
         "brentford", "fulham", "wolves", "brighton", "luton",
-        "lecce", "sassuolo", "elche", "valladolid",
+        "lecce", "sassuolo", "elche", "valladolid", "girona",
+        "odense", "copenhagen", "hellas", "salernitana",
     ]
     if any(c in t for c in obscure_clubs):
         score -= 2; reasons.append("obscure club −2")
 
-    if "away kit info" in t:
-        score -= 2; reasons.append("info not reveal −2")
-    if "overview" in t or "roundup" in t:
-        score -= 2; reasons.append("roundup −2")
+    # Stale news (>2 days old)
+    age = story.get("age_days", 0)
+    if age > 2:
+        score -= 2; reasons.append(f"stale news ({age}d old) −2")
+
+    # Editorial non-news
+    if any(w in t for w in ["away kit info", "info:", "details:", "what we know",
+                             "everything we know"]):
+        score -= 2; reasons.append("editorial info piece −2")
 
     score = max(0, min(10, score))
     return score, " | ".join(reasons) if reasons else "baseline"
@@ -727,13 +804,46 @@ def score_story(story: dict) -> tuple[int, str]:
 # ---------------------------------------------------------------------------
 
 def format_headline(title: str) -> str:
-    """Clean up the raw article title for the card."""
+    """
+    Clean up the raw article title for the card headline.
+
+    Rules (in order):
+      1. Strip source attribution (— Footy Headlines etc.)
+      2. Strip year-range tokens (26-27, 2026-27) — look clumsy at 120px
+      3. Strip EDITORIAL SUBTITLES — the part after " - " when the suffix is
+         a comparison, description, or non-news clause (e.g. "Short-Sleeve vs
+         Long-Sleeve", "Launch Pictures", "What We Know").
+         Only drop the suffix if it contains none of the news-value keywords
+         (leaked / spotted / official / collab / confirmed).
+      4. Hard-cap at 72 chars with ellipsis.
+    """
+    # 1. Source attribution
     title = re.sub(r"\s*[|—–-]\s*(footy headlines?|footyheadlines\.com).*$",
                    "", title, flags=re.IGNORECASE).strip()
-    # Strip year ranges from display headline (26-27 looks odd at 120px)
+
+    # 2. Year ranges
     title = re.sub(r'\b20\d{2}[-–]\d{2,4}\b', '', title)
     title = re.sub(r'\b\d{2}-\d{2}\b', '', title)
     title = re.sub(r'\s+', ' ', title).strip()
+
+    # 3. Editorial subtitles — strip everything after the first " - " separator
+    #    UNLESS the subtitle itself carries news value.
+    _keep_subtitle_words = {
+        "leaked", "spotted", "official", "confirmed", "breaking",
+        "exclusive", "collab", "collaboration", "signing", "transfer",
+        "released", "launch", "drop",
+    }
+    parts = re.split(r'\s*[-–—]\s*', title, maxsplit=1)
+    if len(parts) == 2:
+        main_clause, subtitle = parts[0].strip(), parts[1].strip()
+        subtitle_lower = subtitle.lower()
+        if not any(w in subtitle_lower for w in _keep_subtitle_words):
+            # Subtitle is descriptive/editorial — drop it
+            title = main_clause
+
+    title = re.sub(r'\s+', ' ', title).strip()
+
+    # 4. Length cap
     if len(title) > 72:
         title = title[:70].rsplit(" ", 1)[0] + "…"
     return title.strip()
@@ -947,22 +1057,68 @@ def _upgrade_blogger_url(url: str) -> str:
     return re.sub(r'/s\d{2,4}(-[^/]*)/', '/s1200/', url)
 
 
-def scrape_article_images(url: str, max_images: int = 4) -> "list[bytes]":
+def _img_hash(data: bytes) -> str:
+    """MD5 of a thumbnail — fast perceptual near-duplicate detector."""
+    import hashlib
+    try:
+        img = Image.open(io.BytesIO(data)).convert("RGB").resize((32, 32))
+        buf = io.BytesIO()
+        img.save(buf, "JPEG", quality=50)
+        return hashlib.md5(buf.getvalue()).hexdigest()
+    except Exception:
+        import hashlib
+        return hashlib.md5(data[:4096]).hexdigest()
+
+
+def _process_image_bytes(data: bytes, img_url: str) -> "bytes | None":
+    """
+    Validate dimensions, crop landscape/split-panels to left half.
+    Returns processed bytes or None if the image should be skipped.
+    """
+    try:
+        img_check = Image.open(io.BytesIO(data))
+        w, h = img_check.size
+
+        # Skip thumbnails / icons (related-post widgets, ads, etc.)
+        if w < 500 or h < 400:
+            log.debug("Skipping small image (%dx%d): %s", w, h, img_url[:70])
+            return None
+
+        # Landscape / split-panel → crop to left half (one clean product view)
+        ar = w / h
+        if ar > 1.35:
+            crop_w = w // 2
+            cropped = img_check.crop((0, 0, crop_w, h))
+            buf = io.BytesIO()
+            cropped.convert("RGB").save(buf, "JPEG", quality=92)
+            data = buf.getvalue()
+            log.debug("Cropped wide image (ar=%.2f) to left half: %s", ar, img_url[:70])
+    except Exception:
+        pass  # accept as-is if we can't check
+
+    return data
+
+
+def scrape_article_images(url: str, max_images: int = 4,
+                          is_kit: bool = False) -> "list[bytes]":
     """
     Fetch the actual article page and pull out product images.
-    Returns up to max_images image-byte chunks — the REAL leaked renders/
-    photos from the article, not generic stock.
+    Returns up to max_images image-byte chunks — the REAL renders/photos
+    for the story, not generic stock.
 
-    Strategy:
-      1. og:image (usually the hero/cover shot)
-      2. <a href> links inside the article body that point to images — on
-         Blogger these links lead to the full-resolution individual product shot
-         while the <img src> is a scaled thumbnail.
-      3. Fallback to <img src> tags if no <a>-linked images found.
+    WATERMARK STRATEGY
+    ──────────────────
+    footyheadlines creates their own exclusive KIT renders and stamps
+    "FOOTYHEADLINES" across them — those are ALWAYS watermarked.
+    For KIT stories we therefore take ONLY the og:image (the Twitter Card /
+    article header, often an official brand render) and skip the in-article
+    <a href> images entirely.
 
-    For landscape/wide images (split panels showing two angles):
-      → Crop to the LEFT HALF so we get one accurate product view
-        rather than discarding the image entirely.
+    For BOOT stories the in-article images are official Adidas/Nike press
+    photos — no watermark. We fetch those freely.
+
+    Duplicate detection uses an MD5 of a 32×32 thumbnail so near-identical
+    images from different CDN size tokens are caught.
     """
     if "footyheadlines.com" not in url:
         return []
@@ -987,95 +1143,61 @@ def scrape_article_images(url: str, max_images: int = 4) -> "list[bytes]":
         if u not in found_urls:
             found_urls.append(u)
 
-    # ── 1. og:image (hero shot) ───────────────────────────────────────────────
+    # ── 1. og:image (hero shot — always collected) ────────────────────────────
     og = soup.find("meta", property="og:image")
     if og and og.get("content"):
         _add(og["content"])
 
-    # ── 2. Article body — try every known Blogger/CMS selector ──────────────
-    article_body = (
-        soup.select_one(".post-body")          # Blogger default
-        or soup.select_one(".post-content")
-        or soup.select_one(".entry-content")
-        or soup.select_one(".article-content")
-        or soup.select_one("article")
-        or soup.select_one("#post-body")
-        or soup.select_one(".story-body")
-        or soup.find("main")
-    )
-
-    # ── Strategy A: <a href> links that wrap <img> (Blogger lazy-load pattern) ─
-    # footyheadlines lazy-loads all images: <img src="data:image/svg+xml,...">
-    # wrapped in <a href="https://blogger.googleusercontent.com/...actual.jpg">.
-    # The page body selector never matches, so we search soup.
-    # CRITICAL: product images appear FIRST in the HTML; related-post thumbnails
-    # come after.  We cap at max_images links to stay in the main content zone.
-    # footyheadlines articles: og:image (hero) + typically 1 product close-up,
-    # then related-post thumbnails immediately after.  Cap at 1 <a> link to avoid
-    # pulling in related-post images (which show unrelated boots/players).
-    # Combined with og:image this gives 2 accurate slides per post.
-    a_link_cap   = 1
-    a_link_count = 0
-    for a_tag in soup.find_all("a", href=True):
-        if a_link_count >= a_link_cap:
-            break
-        if not a_tag.find("img"):          # must wrap an <img>
-            continue
-        href = a_tag["href"]
-        if any(token in href.lower() for token in
-               ["googleusercontent.com", "blogger.com/img", "bp.blogspot"]):
-            before = len(found_urls)
-            _add(href)
-            if len(found_urls) > before:   # actually added (not duplicate)
-                a_link_count += 1
-
-    # ── Strategy B: <img> tags with real src / lazy-load attrs ───────────────
-    # Fallback for non-Blogger hosts or articles where images aren't in <a> links.
-    img_search_root = article_body if article_body else soup
-    for img_tag in img_search_root.find_all("img"):
-        for attr in ("src", "data-src", "data-original",
-                     "data-lazy-src", "data-lazy", "data-delayed-url"):
-            src = img_tag.get(attr, "")
-            if src and not src.startswith("data:"):   # skip svg placeholders
-                _add(src)
+    if not is_kit:
+        # ── Boot/general: grab <a href> in-article images ──────────────────────
+        # footyheadlines lazy-loads: <img src="data:image/svg+xml,..."> wrapped
+        # in <a href="https://blogger.googleusercontent.com/...actual.jpg">.
+        #
+        # CRITICAL cap: product images appear FIRST in the HTML; related-post
+        # thumbnails immediately follow.  Cap at 1 <a> link to stay in the main
+        # content zone — og:image (hero) + 1 product close-up = 2 clean slides.
+        # (Strategy B / <img> tag scan was removed; it picked up related posts.)
+        a_link_cap   = 1
+        a_link_count = 0
+        for a_tag in soup.find_all("a", href=True):
+            if a_link_count >= a_link_cap:
                 break
+            if not a_tag.find("img"):
+                continue
+            href = a_tag["href"]
+            if any(token in href.lower() for token in
+                   ["googleusercontent.com", "blogger.com/img", "bp.blogspot"]):
+                before = len(found_urls)
+                _add(href)
+                if len(found_urls) > before:
+                    a_link_count += 1
+    else:
+        log.info("Kit story — skipping in-article renders (watermarked). "
+                 "Using og:image only; extra slides from Google.")
 
-    log.info("Article %s — found %d candidate image URLs", url, len(found_urls))
+    log.info("Article %s — found %d candidate image URLs (is_kit=%s)",
+             url, len(found_urls), is_kit)
 
     collected: list[bytes] = []
-    for img_url in found_urls[:max_images * 3]:   # try plenty to fill quota
+    seen_hashes: set[str] = set()
+
+    for img_url in found_urls[:max_images * 3]:
         if len(collected) >= max_images:
             break
         data = _download_image(img_url)
         if not data or len(data) < 10_000:
             continue
 
-        # ── Dimension + quality check ─────────────────────────────────────────
-        try:
-            img_check = Image.open(io.BytesIO(data))
-            w, h = img_check.size
-
-            # Skip thumbnails / icons (related-post widgets, ads, etc.)
-            if w < 500 or h < 400:
-                log.debug("Skipping small image (%dx%d): %s", w, h, img_url[:70])
-                continue
-
-            # Landscape / split-panel → crop to left half (one product view)
-            ar = w / h
-            if ar > 1.35:
-                crop_w = w // 2
-                cropped = img_check.crop((0, 0, crop_w, h))
-                buf = io.BytesIO()
-                cropped.convert("RGB").save(buf, "JPEG", quality=92)
-                data = buf.getvalue()
-                log.debug("Cropped wide article image (ar=%.2f) to portrait half: %s",
-                          ar, img_url[:70])
-        except Exception:
-            pass  # can't check — accept as-is
-
-        # De-duplicate: skip if we already have a byte-identical image
-        if data in (c for c in collected):
+        data = _process_image_bytes(data, img_url)
+        if data is None:
             continue
+
+        # Perceptual duplicate check (catches same image at different CDN sizes)
+        h = _img_hash(data)
+        if h in seen_hashes:
+            log.debug("Skipping near-duplicate image: %s", img_url[:70])
+            continue
+        seen_hashes.add(h)
 
         collected.append(data)
         log.info("  Article image %d: %s", len(collected), img_url[:80])
@@ -1218,10 +1340,15 @@ def find_images(
 
     # ── Priority 1: scrape actual article images ──────────────────────────────
     if article_url:
-        article_imgs = scrape_article_images(article_url, max_images=n)
+        is_kit = _story_content_type(title) == "kit"
+        article_imgs = scrape_article_images(article_url, max_images=n, is_kit=is_kit)
         if article_imgs:
             log.info("Using %d article images (accurate product renders).", len(article_imgs))
-            return article_imgs[:n]
+            # For kit stories we only got og:image from article; if we need more
+            # slides fall through to Google below rather than returning early.
+            if not is_kit or len(article_imgs) >= n:
+                return article_imgs[:n]
+            collected.extend(article_imgs)
 
     # ── Priority 2: tweet/RSS attached image ─────────────────────────────────
     if preferred_url:
@@ -1576,11 +1703,40 @@ def main() -> None:
         "--dry-run", action="store_true",
         help="Generate the card locally but do NOT post to Instagram.",
     )
+    parser.add_argument(
+        "--force-url", metavar="URL",
+        help="Force the pipeline to use this article URL instead of scraping for stories. "
+             "Useful for testing a specific article. Implies --dry-run unless combined with live run.",
+    )
+    parser.add_argument(
+        "--force-title", metavar="TITLE", default=None,
+        help="Override the headline when using --force-url.",
+    )
     args = parser.parse_args()
-    dry_run: bool = args.dry_run
+    dry_run: bool = args.dry_run or bool(args.force_url)
 
     log.info("=== Footy Culture HQ pipeline starting%s ===",
              " [DRY RUN]" if dry_run else "")
+
+    # ── Force-URL shortcut: test a specific article without full scrape ───────
+    if args.force_url:
+        force_url   = args.force_url.strip()
+        force_title = (args.force_title or force_url.split("/")[-1]
+                       .replace("-", " ").replace(".html", "").title())
+        log.info("FORCE URL mode: %s  title=%r", force_url, force_title)
+        category       = pick_category(force_title)
+        raw_headline   = format_headline(force_title)
+        hype_headline  = inject_hype(raw_headline, category)
+        caption        = build_caption(force_title, category)
+        log.info("Category: %s  Headline: %r", category, hype_headline)
+        images_bytes   = find_images(force_title, article_url=force_url, n=3)
+        slide_paths    = generate_carousel(hype_headline, category, images_bytes)
+        if slide_paths:
+            log.info("Generated %d slide(s): %s", len(slide_paths), slide_paths)
+            log.info("[DRY RUN] Skipping Instagram post. Cards: %s", slide_paths)
+        else:
+            log.error("Card generation failed.")
+        return
 
     # ── Load history ─────────────────────────────────────────────────────────
     posted = _load_posted()
@@ -1617,6 +1773,42 @@ def main() -> None:
             seen_ids.add(s["id"])
             unique.append(s)
     log.info("Unique stories after dedup: %d", len(unique))
+
+    # ── Cross-source confirmation ─────────────────────────────────────────────
+    # If the same ENTITY (club/player/boot) appears in stories from 2+ different
+    # sources within our window, mark all those stories as cross_source_confirmed.
+    # We fingerprint by extracting the most specific noun from the title.
+    def _story_fingerprint(title: str) -> str:
+        """Return a short lower-case key representing the main entity."""
+        t = title.lower()
+        # Remove common filler words
+        filler = re.compile(
+            r"\b(kit|boot|boots|shoe|shoes|jersey|shirt|away|home|third|new|"
+            r"leaked|leak|spotted|official|revealed?|confirmed|launch|drop|"
+            r"release|season|colou?rway|picture|photo|image)\b"
+        )
+        key = filler.sub("", t)
+        key = re.sub(r"[^a-z0-9 ]", " ", key)
+        key = re.sub(r"\s+", " ", key).strip()
+        return key[:40]   # first 40 chars of normalised title
+
+    source_map: dict[str, set[str]] = {}   # fingerprint → set of sources
+    fp_map:     dict[str, str]      = {}   # story_id → fingerprint
+
+    for s in unique:
+        fp  = _story_fingerprint(s["title"])
+        src = s.get("source", "FootyHeadlines")
+        fp_map[s["id"]] = fp
+        source_map.setdefault(fp, set()).add(src)
+
+    confirmed_fps = {fp for fp, srcs in source_map.items() if len(srcs) >= 2}
+
+    for s in unique:
+        fp = fp_map.get(s["id"], "")
+        if fp in confirmed_fps:
+            s["cross_source_confirmed"] = True
+            log.info("  ✓ Cross-source confirmed: %r (sources: %s)",
+                     s["title"][:60], ", ".join(source_map[fp]))
 
     # ── Score + filter ────────────────────────────────────────────────────────
     posted_ids = {p.get("id") for p in posted}

@@ -153,11 +153,12 @@ def _tb(draw, text, font):
 def _wrap_headline(draw, text: str, max_w: int, max_lines: int = 2
                    ) -> tuple[list[str], ImageFont.FreeTypeFont]:
     """
-    Find the largest Anton size (90–120px) where the text fits in ≤ max_lines.
+    Find the largest Anton size where the text fits in ≤ max_lines.
+    Tries 120 → 58px in 6px steps, then falls back to 3 lines at 58px.
     Returns (wrapped_lines, font).
     """
     text = text.upper()
-    for size in range(120, 74, -6):   # 120, 114, 108, … 80
+    for size in range(120, 52, -6):   # 120, 114, … 58px
         font = _font(size, "headline")
         words = text.split()
         lines: list[str] = []
@@ -176,11 +177,23 @@ def _wrap_headline(draw, text: str, max_w: int, max_lines: int = 2
             lines.append(cur)
         if len(lines) <= max_lines:
             return lines, font
-    # Last resort: force into 2 lines at minimum size
-    font = _font(80, "headline")
+
+    # Last resort: allow 3 lines at 58px — still fits on the card
+    font = _font(58, "headline")
     words = text.split()
-    mid = len(words) // 2
-    return [" ".join(words[:mid]), " ".join(words[mid:])], font
+    lines = []
+    cur = ""
+    for w in words:
+        test = (cur + " " + w).strip()
+        if _tw(draw, test, font) <= max_w:
+            cur = test
+        else:
+            if cur:
+                lines.append(cur)
+            cur = w
+    if cur:
+        lines.append(cur)
+    return lines[:3], font
 
 
 # ---------------------------------------------------------------------------
@@ -224,9 +237,9 @@ def create_post(
     #   Stage 2 (SOLID_H – FADE_H): smooth gradient from opaque → transparent
     # Our "FOOTY CULTURE" + boot icon are rendered AFTER this overlay, so they
     # stay crisp white on the dark background.
-    SOLID_H  = 72            # first 72px fully dark (where watermarks live)
-    FADE_H   = int(H * 0.24) # gradient ends at 24% of card height
-    SOLID_A  = 235           # near-opaque (92%) for the solid band
+    SOLID_H  = 90            # first 90px fully dark (where watermarks live)
+    FADE_H   = int(H * 0.26) # gradient ends at 26% of card height
+    SOLID_A  = 255           # fully opaque — kills ALL source watermarks
 
     top_vign = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     tv_draw  = ImageDraw.Draw(top_vign)
