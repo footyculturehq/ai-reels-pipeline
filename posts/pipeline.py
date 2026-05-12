@@ -1436,6 +1436,7 @@ def _detect_watermark(img: Image.Image) -> "str | None":
 def validate_image(
     data: bytes,
     img_url: str,
+    allow_top_watermark: bool = False,
 ) -> "tuple[str, str, bytes | None]":
     """
     Master validation pipeline.  Returns (decision, reason, processed_bytes).
@@ -1490,7 +1491,14 @@ def validate_image(
     # ── Rule 4: Watermark detection ───────────────────────────────────────────
     wm = _detect_watermark(img)
     if wm:
-        return _VREJECT, f"Watermark detected ({wm}) — source a cleaner image", None
+        # body-watermark-top = corner URL stamp (e.g. "FOOTYHEADLINES.COM" top-left).
+        # The renderer already trims the top 9% of the photo, which removes it cleanly.
+        # allow_top_watermark lets kit og:images through so we can still post.
+        # body-watermark-mid = diagonal tiling across the whole image — always reject.
+        if wm == "body-watermark-top" and allow_top_watermark:
+            log.info("Allowing top-corner watermark (renderer will trim top 9%%): %s", img_url[:80])
+        else:
+            return _VREJECT, f"Watermark detected ({wm}) — source a cleaner image", None
 
     # ── Rule 7: Final aspect ratio sanity check ───────────────────────────────
     # Accept anything from very tall portrait to wide landscape (2.5:1).
@@ -1608,7 +1616,10 @@ def scrape_article_images(url: str, max_images: int = 4,
         if not data or len(data) < 10_000:
             continue
 
-        decision, reason, data = validate_image(data, img_url)
+        # Kit og:images often have a corner URL stamp that the renderer trims away.
+        # Allow body-watermark-top through for kit stories only.
+        decision, reason, data = validate_image(data, img_url,
+                                                allow_top_watermark=is_kit)
         if decision == _VREJECT:
             log.info("REJECT [%s]: %s", reason, img_url[:80])
             continue
@@ -2497,7 +2508,9 @@ def generate_carousel(
         log.warning("No clean images available — skipping post entirely.")
         return []
 
-    _size  = CATEGORY_SIZE.get(category.upper(), "portrait")
+    # Resolve canvas size from create_post's CATEGORY_SIZE map
+    _cp_mod = sys.modules.get("create_post") or __import__("create_post")
+    _size   = getattr(_cp_mod, "CATEGORY_SIZE", {}).get(category.upper(), "portrait")
     paths: list[str] = []
 
     # Slide 1: branded card using the first (best) image
