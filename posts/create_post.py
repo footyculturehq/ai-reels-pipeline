@@ -20,11 +20,11 @@ from datetime import datetime
 from pathlib import Path
 
 try:
-    from PIL import Image, ImageDraw, ImageFont, ImageEnhance
+    from PIL import Image, ImageDraw, ImageFont, ImageEnhance, ImageFilter
 except ImportError:
     import subprocess
     subprocess.run([sys.executable, "-m", "pip", "install", "Pillow"], check=True)
-    from PIL import Image, ImageDraw, ImageFont, ImageEnhance
+    from PIL import Image, ImageDraw, ImageFont, ImageEnhance, ImageFilter
 
 SCRIPT_DIR = Path(__file__).parent
 OUT_DIR    = SCRIPT_DIR / "output"
@@ -53,6 +53,20 @@ CATEGORY_LABELS = {
     "LEAKED":      "LEAKED",
     "SPOTTED":     "SPOTTED",
     "FOOTBALL":    "FOOTBALL",
+}
+
+# Category → best canvas size.
+# Boots are wide → square frames them without heavy crop.
+# Kits / signings / collabs → tall portrait shows more of the product.
+CATEGORY_SIZE = {
+    "BOOT LAUNCH": "square",
+    "SPOTTED":     "square",   # on-pitch / training shots are often wide
+    "KIT DROP":    "portrait",
+    "SIGNING":     "portrait",
+    "COLLAB":      "portrait",
+    "VAULT":       "portrait",
+    "LEAKED":      "portrait",
+    "FOOTBALL":    "portrait",
 }
 
 
@@ -159,6 +173,88 @@ def _wrap_headline(draw, text: str, max_w: int, max_lines: int = 2
 
 
 # ---------------------------------------------------------------------------
+# Letterbox-with-blur compositor
+# ---------------------------------------------------------------------------
+
+def _letterbox_blur(
+    photo: Image.Image,
+    target_w: int,
+    target_h: int,
+    blur_radius: int = 60,
+    darken_factor: float = 0.55,
+    product_scale: float = 0.82,
+) -> Image.Image:
+    """
+    Frame a product image into (target_w × target_h) without cropping it.
+
+    Background  = the same image, heavily blurred + darkened + desaturated.
+                  Gives a "studio backdrop" feel that matches the product's
+                  colour palette automatically.
+    Foreground  = the full product, scaled so its longest dimension fills
+                  product_scale × the relevant canvas dimension, then pasted
+                  in the upper-centre of the frame (leaves room for headline).
+
+    Returns a composited RGB Image ready to paste onto the canvas.
+    """
+    # ── Background: blur & darken ─────────────────────────────────────────────
+    bg_ratio = photo.width / photo.height
+    tgt_ratio = target_w / target_h
+
+    if bg_ratio > tgt_ratio:
+        new_h = target_h
+        new_w = int(new_h * bg_ratio)
+    else:
+        new_w = target_w
+        new_h = int(new_w / bg_ratio)
+
+    bg = photo.copy().resize((new_w, new_h), Image.LANCZOS)
+    left = (new_w - target_w) // 2
+    top  = (new_h - target_h) // 2
+    bg   = bg.crop((left, top, left + target_w, top + target_h))
+
+    bg = bg.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+    bg = ImageEnhance.Brightness(bg).enhance(darken_factor)
+    bg = ImageEnhance.Color(bg).enhance(0.65)          # desaturate bg slightly
+
+    # ── Foreground: resize to fit, upper-centre ───────────────────────────────
+    fg_ratio = photo.width / photo.height
+
+    if fg_ratio >= 1:
+        # Wide / landscape (boots, balls) → constrain by width
+        new_fg_w = int(target_w * product_scale)
+        new_fg_h = int(new_fg_w / fg_ratio)
+        # Safety: if scaled height is too tall, constrain by height instead
+        if new_fg_h > int(target_h * product_scale):
+            new_fg_h = int(target_h * product_scale)
+            new_fg_w = int(new_fg_h * fg_ratio)
+    else:
+        # Tall / portrait (kits, jackets) → constrain by height, leave text room
+        new_fg_h = int(target_h * product_scale * 0.75)
+        new_fg_w = int(new_fg_h * fg_ratio)
+
+    fg = photo.copy().resize((new_fg_w, new_fg_h), Image.LANCZOS)
+
+    # Trim top 9% of foreground: removes any source URL watermark that lives in
+    # the top-right corner of the original (e.g. "WWW.FOOTYHEADLINES.COM").
+    # For landscape product shots this strip is usually blank background anyway.
+    fg_trim = int(new_fg_h * 0.09)
+    fg = fg.crop((0, fg_trim, new_fg_w, new_fg_h))
+    new_fg_h -= fg_trim
+
+    # Position: horizontally centred, 30% down from top (leaves 70% for text block)
+    paste_x = (target_w - new_fg_w) // 2
+    paste_y = int((target_h - new_fg_h) * 0.30)
+
+    result = bg.convert("RGB")
+    if photo.mode == "RGBA":
+        result.paste(fg, (paste_x, paste_y), fg)
+    else:
+        result.paste(fg, (paste_x, paste_y))
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Main card generator
 # ---------------------------------------------------------------------------
 
@@ -166,16 +262,19 @@ def create_post(
     headline: str,
     category: str = "FOOTBALL",
     image_path: str = None,
-    size: str = "portrait",
+    size: str = "auto",           # "auto" → resolve from CATEGORY_SIZE
     output_path: str = None,
     focal_point: str = "center",
 ) -> str:
+    # ── Canvas size: auto-resolve from category, or use explicit value ─────────
+    if size == "auto":
+        size = CATEGORY_SIZE.get(category.upper(), "portrait")
     W, H = SIZES.get(size, SIZES["portrait"])
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
     canvas = Image.new("RGBA", (W, H), (0, 0, 0, 255))
 
-    # ── FULL-BLEED PHOTO with saturation & brightness boost ───────────────────
+    # ── PHOTO: letterbox (boots/wide) or full-bleed crop (kits/portrait) ──────
     if image_path and os.path.exists(image_path):
         photo = Image.open(image_path).convert("RGB")
 
@@ -184,17 +283,33 @@ def create_post(
         photo = ImageEnhance.Brightness(photo).enhance(1.06)  # +6% brightness
         photo = ImageEnhance.Contrast(photo).enhance(1.04)    # +4% micro-contrast
 
-        ir, cr = photo.width / photo.height, W / H
-        if ir > cr:
-            nh, nw = H, int(H * ir)
+        src_ar  = photo.width / photo.height
+        tgt_ar  = W / H
+
+        # Decision: wide source on portrait/square canvas → letterbox.
+        # A landscape boot shot (ar ~1.5-2.0) on a portrait card (ar 0.8) would
+        # lose most of the product to cropping; letterbox preserves the whole shoe.
+        # Portrait/near-square sources on any canvas → full-bleed crop as before.
+        use_letterbox = src_ar > 1.15 and tgt_ar <= 1.05
+
+        if use_letterbox:
+            composited = _letterbox_blur(photo, W, H,
+                                         blur_radius=65,
+                                         darken_factor=0.52,
+                                         product_scale=0.84)
+            canvas.paste(composited.convert("RGBA"), (0, 0))
         else:
-            nw, nh = W, int(W / ir)
-        photo = photo.resize((nw, nh), Image.LANCZOS)
-        ox = (nw - W) // 2
-        focal = (focal_point or "center").lower()
-        oy = 0 if focal == "top" else (nh - H if focal == "bottom" else (nh - H) // 2)
-        photo = photo.crop((ox, oy, ox + W, oy + H))
-        canvas.paste(photo.convert("RGBA"), (0, 0))
+            # Full-bleed crop (existing behaviour)
+            if src_ar > tgt_ar:
+                nh, nw = H, int(H * src_ar)
+            else:
+                nw, nh = W, int(W / src_ar)
+            photo = photo.resize((nw, nh), Image.LANCZOS)
+            ox    = (nw - W) // 2
+            focal = (focal_point or "center").lower()
+            oy    = 0 if focal == "top" else (nh - H if focal == "bottom" else (nh - H) // 2)
+            photo = photo.crop((ox, oy, ox + W, oy + H))
+            canvas.paste(photo.convert("RGBA"), (0, 0))
     else:
         draw_ph = ImageDraw.Draw(canvas)
         draw_ph.rectangle([(0, 0), (W, H)], fill=(15, 15, 15, 255))
@@ -209,6 +324,26 @@ def create_post(
         alpha = int(TOP_VIGN_MAX_A * (t ** 0.7))
         tv_draw.rectangle([(0, row), (W, row + 1)], fill=(0, 0, 0, alpha))
     canvas = Image.alpha_composite(canvas, top_vign)
+
+    # ── TOP-RIGHT BRAND COVER — opaque black corner to bury any source URL ────
+    # footyheadlines (and most sport-media CDNs) embed "WWW.SITE.COM" in the
+    # top-right corner of every image.  A 220px wide × 60px tall solid-black
+    # block + a 40px gradient left-edge fade erases it cleanly without killing
+    # the hero image — the top vignette already darkens the very top anyway.
+    TR_W = 260   # cover width (px) — enough for ~20-char URL at small font
+    TR_H = 72    # cover height (px) — tall enough for 2-line URLs at any size
+    tr_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    tr_draw  = ImageDraw.Draw(tr_layer)
+    # Solid core
+    tr_draw.rectangle([(W - TR_W + 40, 0), (W, TR_H)], fill=(0, 0, 0, 255))
+    # Left-edge fade (40px) so it blends into the vignette
+    for col in range(40):
+        fade_a = int(255 * (col / 40) ** 1.5)
+        tr_draw.rectangle(
+            [(W - TR_W + col, 0), (W - TR_W + col + 1, TR_H)],
+            fill=(0, 0, 0, fade_a),
+        )
+    canvas = Image.alpha_composite(canvas, tr_layer)
 
     # ── BOTTOM GRADIENT (transparent → 72% black) ─────────────────────────────
     grad_start = int(H * GRADIENT_START_FRAC)

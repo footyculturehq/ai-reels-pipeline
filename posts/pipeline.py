@@ -30,6 +30,7 @@ import re
 import sys
 import tempfile
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -586,6 +587,117 @@ def _month_num(name: str) -> int:
 
 
 # ---------------------------------------------------------------------------
+# 1c. Brand press room scraper — zero-watermark source
+# ---------------------------------------------------------------------------
+
+# Brand press rooms publish official product images the moment a product drops.
+# These are the cleanest possible images: no watermark, official resolution, correct colours.
+BRAND_PRESS_FEEDS = [
+    # Adidas newsroom RSS  (product & football releases)
+    ("https://news.adidas.com/rss/news-releases.rss",         "Adidas Newsroom"),
+    # Nike news RSS
+    ("https://news.nike.com/rss",                             "Nike News"),
+    # PUMA global news RSS
+    ("https://about.puma.com/rss",                            "PUMA News"),
+    # New Balance Newsroom
+    ("https://newbalance.com/en_US/newsroom.rss",             "New Balance News"),
+]
+
+# Keywords that gate press-room articles — only football/boots/kits
+_PRESS_BOOT_KIT_WORDS = [
+    "football", "soccer", "boot", "boots", "cleat", "cleats",
+    "kit", "jersey", "shirt", "strip", "colourway", "colorway",
+    "mercurial", "predator", "phantom", "tiempo", "copa", "future",
+    "puma ultra", "puma king", "crampons", "chaussure",
+]
+
+
+def scrape_brand_press_rooms(max_age_days: int = MAX_AGE_DAYS) -> list[dict]:
+    """
+    Scrape brand press room RSS feeds for official product announcements.
+    These carry zero watermarks and use the brand's own high-res press assets.
+    """
+    try:
+        import feedparser  # noqa: PLC0415
+    except ImportError:
+        log.warning("feedparser not installed — skipping brand press rooms.")
+        return []
+
+    now = datetime.now(tz=timezone.utc)
+    stories: list[dict] = []
+
+    for feed_url, source_name in BRAND_PRESS_FEEDS:
+        try:
+            feed = feedparser.parse(feed_url)
+            if not feed.entries:
+                log.debug("Press room feed empty / unreachable: %s", feed_url)
+                continue
+
+            for entry in feed.entries[:30]:
+                title = entry.get("title", "").strip()
+                if not title or len(title) < 8:
+                    continue
+
+                # Only keep football-relevant releases
+                t_low = title.lower()
+                summary_low = (entry.get("summary", "") or "").lower()
+                combined = t_low + " " + summary_low
+                if not any(w in combined for w in _PRESS_BOOT_KIT_WORDS):
+                    continue
+
+                published = entry.get("published_parsed")
+                story_date = datetime(*published[:6], tzinfo=timezone.utc) if published else now
+                age_days   = (now - story_date).days
+                if age_days > max_age_days:
+                    continue
+
+                link = entry.get("link", "")
+
+                # Extract image from media content or enclosure
+                press_image: "str | None" = None
+                for media in entry.get("media_content", []):
+                    if media.get("url", "").lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
+                        press_image = media["url"]
+                        break
+                if not press_image:
+                    for enc in entry.get("enclosures", []):
+                        if enc.get("type", "").startswith("image"):
+                            press_image = enc.get("href") or enc.get("url")
+                            break
+                if not press_image:
+                    raw = (entry.get("summary", "") or
+                           (entry.get("content") or [{}])[0].get("value", ""))
+                    m = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', raw)
+                    if m:
+                        press_image = m.group(1)
+
+                stories.append({
+                    "id":          _story_id(title),
+                    "title":       title,
+                    "url":         link,
+                    "date":        story_date.isoformat(),
+                    "age_days":    age_days,
+                    "source":      source_name,
+                    "tweet_image": press_image,
+                })
+                log.debug("Press room story: %r  (%s, %d days old)", title[:60], source_name, age_days)
+
+        except Exception as exc:
+            log.warning("Brand press room scrape failed for %s: %s", source_name, exc)
+
+    seen: set[str] = set()
+    unique: list[dict] = []
+    for s in stories:
+        if s["id"] not in seen:
+            seen.add(s["id"])
+            unique.append(s)
+
+    unique.sort(key=lambda x: x["age_days"])
+    log.info("Brand press rooms: %d football stories ≤ %d days old.", len(unique), max_age_days)
+    return unique
+
+
+# ---------------------------------------------------------------------------
 # 2. Category detection + scoring + headline tools
 # ---------------------------------------------------------------------------
 
@@ -850,14 +962,14 @@ def format_headline(title: str) -> str:
 
 
 _HYPE_WORDS = {
-    "LEAKED":      ["LEAKED:", "FIRST LOOK:", "EXCLUSIVE:", "LEAKED:"],
-    "SPOTTED":     ["SPOTTED:", "CAUGHT:", "ON FEET:"],
-    "KIT DROP":    ["CLEAN NEW", "INSANE NEW", "OFFICIAL:"],
-    "BOOT LAUNCH": ["FIRST LOOK:", "INSANE NEW", "OFFICIAL:"],
-    "SIGNING":     ["BREAKING:", "OFFICIAL:", "CONFIRMED:"],
-    "COLLAB":      ["INSANE NEW", "MASSIVE:", "EXCLUSIVE:"],
-    "VAULT":       ["CLASSIC NEW", "VAULT:", "BACK:"],
-    "FOOTBALL":    ["BREAKING:", "OFFICIAL:", "LATEST:"],
+    "LEAKED":      ["LEAKED:", "FIRST LOOK:", "EXCLUSIVE:", "JUST IN:"],
+    "SPOTTED":     ["SPOTTED:", "CAUGHT:", "ON FEET:", "TRAINING GROUND:"],
+    "KIT DROP":    ["OFFICIAL:", "DROPPED:", "REVEALED:", "JUST IN:"],
+    "BOOT LAUNCH": ["FIRST LOOK:", "OFFICIAL:", "DROPPED:", "REVEALED:"],
+    "SIGNING":     ["BREAKING:", "OFFICIAL:", "CONFIRMED:", "JUST IN:"],
+    "COLLAB":      ["EXCLUSIVE:", "MASSIVE:", "DROPPED:", "REVEALED:"],
+    "VAULT":       ["VAULT:", "ICONIC.", "BACK:", "CLASSIC."],
+    "FOOTBALL":    ["BREAKING:", "OFFICIAL:", "JUST IN:", "LATEST:"],
 }
 
 
@@ -1114,6 +1226,36 @@ def _upgrade_blogger_url(url: str) -> str:
     return re.sub(r'/s\d{2,4}(-[^/]*)/', '/s0/', url)
 
 
+# ===========================================================================
+# IMAGE VALIDATION PIPELINE
+# Rules run BEFORE rendering/posting. Any REJECT = image discarded.
+# ===========================================================================
+
+_VPASS   = "PASS"
+_VREJECT = "REJECT"
+_VMANUAL = "MANUAL"
+
+# Minimum source resolution (checked AFTER any crop)
+_MIN_SRC_W = 900    # at least 900px wide so 1080px output isn't upscaled
+_MIN_SRC_H = 600    # at least 600px tall (Twitter Cards are 1200×630 — valid)
+
+# Known competitor/site watermarks to reject
+_KNOWN_WATERMARKS = [
+    "footyheadlines", "soccerbible", "sneakerjagers",
+    "footynews", "footyissues", "csc", "kitboys",
+]
+
+# Approved CDN domains for images that contain people (brand/club press shots)
+_APPROVED_PERSON_DOMAINS = [
+    "googleusercontent.com",   # Blogger CDN (official brand assets)
+    "bp.blogspot.com",
+    "nike.com", "adidas.com", "puma.com",
+    "newbalance.com", "umbro.com", "castore.com",
+    "manchester", "realmadrid", "fcbarcelona",
+    "arsenal", "liverpool", "chelsea",
+]
+
+
 def _img_hash(data: bytes) -> str:
     """MD5 of a thumbnail — fast perceptual near-duplicate detector."""
     import hashlib
@@ -1123,39 +1265,186 @@ def _img_hash(data: bytes) -> str:
         img.save(buf, "JPEG", quality=50)
         return hashlib.md5(buf.getvalue()).hexdigest()
     except Exception:
-        import hashlib
         return hashlib.md5(data[:4096]).hexdigest()
 
 
-def _process_image_bytes(data: bytes, img_url: str) -> "bytes | None":
+def _detect_portrait_composite(img: Image.Image) -> bool:
     """
-    Validate dimensions, crop landscape/split-panels to left half.
-    Returns processed bytes or None if the image should be skipped.
+    Rule 1 (portrait): detect side-by-side composite layouts in portrait images.
+    Compares colour histogram of left half vs right half.
+    High divergence = different subjects = stitched composite.
     """
     try:
-        img_check = Image.open(io.BytesIO(data))
-        w, h = img_check.size
+        w, h = img.size
+        left  = img.crop((0, 0, w // 2, h)).convert("RGB")
+        right = img.crop((w // 2, 0, w, h)).convert("RGB")
 
-        # Enforce minimum resolution — reject thumbnails and low-res sources.
-        # /s0/ Blogger CDN gives original; 900px is the floor so product detail
-        # stays sharp when upscaled to 1080px output.
-        if w < 900 or h < 700:
-            log.debug("Skipping low-res image (%dx%d): %s", w, h, img_url[:70])
-            return None
+        def _hist16(im: Image.Image) -> list[int]:
+            raw = im.histogram()   # 256 bins × 3 channels
+            return [sum(raw[c * 256 + i * 16: c * 256 + (i + 1) * 16])
+                    for c in range(3) for i in range(16)]
 
-        # Landscape / split-panel → crop to left half (one clean product view)
-        ar = w / h
-        if ar > 1.35:
-            crop_w = w // 2
-            cropped = img_check.crop((0, 0, crop_w, h))
-            buf = io.BytesIO()
-            cropped.convert("RGB").save(buf, "JPEG", quality=92)
-            data = buf.getvalue()
-            log.debug("Cropped wide image (ar=%.2f) to left half: %s", ar, img_url[:70])
+        lh = _hist16(left)
+        rh = _hist16(right)
+        total = sum(lh) + 1
+        dist = sum(abs(a - b) for a, b in zip(lh, rh)) / total
+        return dist > 0.85   # 0.85 = halves are very different subjects
     except Exception:
-        pass  # accept as-is if we can't check
+        return False
 
-    return data
+
+def _detect_skin_fraction(img: Image.Image) -> float:
+    """
+    Rule 3: estimate fraction of pixels that are human skin tone.
+    Classic RGB skin filter: R>95, G>40, B>20, R>G>B, R-G>15.
+    Returns 0.0–1.0.
+    """
+    try:
+        small = img.convert("RGB").resize((80, 100))
+        pixels = list(small.getdata())
+        skin = sum(
+            1 for r, g, b in pixels
+            if r > 95 and g > 40 and b > 20
+            and r > g > b
+            and (r - g) > 15
+            and abs(int(r) - int(b)) > 15
+        )
+        return skin / len(pixels) if pixels else 0.0
+    except Exception:
+        return 0.0
+
+
+def _detect_watermark(img: Image.Image) -> "str | None":
+    """
+    Rule 4: detect competitor watermarks using brightness/variance analysis
+    on corner regions.  Without pytesseract we use structural heuristics:
+    - Top strip: mid-gray band with high local variance = text overlay
+    - If the top strip average brightness is in the 'rendered-text gray' range
+      AND variance is high → likely a baked-in watermark label.
+
+    NOTE: This catches footyheadlines' gray 'FOOTYHEADLINES.COM' render stamp.
+    True OCR (pytesseract) would be more reliable — add later.
+    """
+    """
+    Rule 4: detect BODY watermarks — the tiled / stamped kind that ruin the image.
+
+    footyheadlines uses two watermark patterns:
+      A) BODY stamp: diagonal "FOOTYHEADLINES.COM" tiled across the whole image
+         (kit renders, exclusive-leak renders) — always reject.
+      B) CORNER URL: "WWW.FOOTYHEADLINES.COM" text only in the top-right corner
+         (official brand press photos they host) — covered by the card overlay.
+
+    We detect pattern A using three regions:
+      • Top-left strip  (kit renders stamp here)
+      • Mid-body centre (diagonal tiling passes through here)
+    We deliberately ignore the top-right corner (pattern B) because every
+    footyheadlines CDN image has it and create_post.py covers it with branding.
+    """
+    try:
+        w, h = img.size
+        strip_h = min(55, h)
+        mid_h   = h // 2
+
+        def _score(region) -> "tuple[float, float]":
+            pix = list(region.convert("L").getdata())
+            if not pix:
+                return 0.0, 0.0
+            avg = sum(pix) / len(pix)
+            var = sum((p - avg) ** 2 for p in pix) / len(pix)
+            return avg, var
+
+        # ── Pattern A: top-left strip ─────────────────────────────────────────
+        avg_l, var_l = _score(img.crop((0, 0, int(w * 0.6), strip_h)))
+        if 80 < avg_l < 215 and var_l > 900:
+            return "body-watermark-top"
+
+        # ── Pattern A: centre-body strip ──────────────────────────────────────
+        # Diagonal tiling is visible in the centre of kit renders.
+        # Clean boot press photos on white/light bg have var ~200-1000 in the body.
+        # Watermarked images (tiled text) have var 4000-8000 there.
+        # Threshold at 2500 avoids false-positives on colourful boots.
+        body_y1 = mid_h - 30
+        body_y2 = mid_h + 30
+        avg_m, var_m = _score(img.crop((int(w * 0.1), body_y1, int(w * 0.7), body_y2)))
+        if 80 < avg_m < 215 and var_m > 2500:
+            return "body-watermark-mid"
+
+    except Exception:
+        pass
+    return None
+
+
+def validate_image(
+    data: bytes,
+    img_url: str,
+) -> "tuple[str, str, bytes | None]":
+    """
+    Master validation pipeline.  Returns (decision, reason, processed_bytes).
+
+    PASS   → image is clean; processed_bytes has landscape crops applied
+    REJECT → hard fail; discard this image
+    MANUAL → soft flag; keep but log for review
+    """
+    try:
+        img = Image.open(io.BytesIO(data)).convert("RGB")
+    except Exception as exc:
+        return _VREJECT, f"Cannot open image: {exc}", None
+
+    w, h = img.size
+    ar   = w / h
+
+    # ── Rule 1: Split-panel / layout detection ────────────────────────────────
+    # Only crop if TWO DISTINCT SUBJECTS are detected side-by-side.
+    # A regular wide/landscape image (single subject) is NOT a split panel —
+    # create_post.py will crop it to portrait via focal_point automatically.
+    if ar > 1.35:
+        if _detect_portrait_composite(img):
+            # Landscape split-panel (e.g. flat kit + worn kit side-by-side)
+            img = img.crop((0, 0, w // 2, h))
+            w, h = img.size
+            log.debug("CROP: landscape composite (ar=%.2f) → left half: %s", ar, img_url[:60])
+        # else: single-subject wide image — keep whole; card generator crops to portrait
+    elif 1.05 < ar <= 1.35 and _detect_portrait_composite(img):
+        # Near-square composite with two distinct halves → crop left
+        img = img.crop((0, 0, w // 2, h))
+        w, h = img.size
+        log.debug("CROP: portrait composite → left half: %s", img_url[:60])
+
+    # ── Rule 2: Resolution (post-crop) ───────────────────────────────────────
+    # For landscape images (ar ≥ 1.2, e.g. Twitter Cards / og:image 1200×630)
+    # we relax the height floor to 450px — the card generator crops to portrait.
+    min_h = 450 if (w / h) >= 1.2 else _MIN_SRC_H
+    if w < _MIN_SRC_W or h < min_h:
+        return _VREJECT, f"Too small after crop: {w}×{h} (min {_MIN_SRC_W}×{min_h})", None
+
+    # ── Rule 3: Random-person detection ──────────────────────────────────────
+    skin = _detect_skin_fraction(img)
+    if skin > 0.18:   # >18% skin tone = likely contains a person
+        # Allow from known brand/club CDNs (official campaign shots)
+        url_lower = img_url.lower()
+        is_approved = any(d in url_lower for d in _APPROVED_PERSON_DOMAINS)
+        if not is_approved:
+            return _VREJECT, f"Person detected (skin={skin:.0%}) from unapproved source", None
+        # Approved source with person → allow, but log
+        log.debug("Person in approved-source image (skin=%.0f%%): %s", skin * 100, img_url[:60])
+
+    # ── Rule 4: Watermark detection ───────────────────────────────────────────
+    wm = _detect_watermark(img)
+    if wm:
+        return _VREJECT, f"Watermark detected ({wm}) — source a cleaner image", None
+
+    # ── Rule 7: Final aspect ratio sanity check ───────────────────────────────
+    # Accept anything from very tall portrait to wide landscape (2.5:1).
+    # create_post.py handles all output cropping to 4:5 — we just reject
+    # extreme slivers/banners that will look terrible even after cropping.
+    final_ar = w / h
+    if not (0.3 <= final_ar <= 2.5):
+        return _VREJECT, f"Unusable aspect ratio {final_ar:.2f} (accepted: 0.3–2.5)", None
+
+    # Re-encode at high quality
+    buf = io.BytesIO()
+    img.save(buf, "JPEG", quality=94)
+    return _VPASS, "All checks passed", buf.getvalue()
 
 
 def scrape_article_images(url: str, max_images: int = 4,
@@ -1260,9 +1549,12 @@ def scrape_article_images(url: str, max_images: int = 4,
         if not data or len(data) < 10_000:
             continue
 
-        data = _process_image_bytes(data, img_url)
-        if data is None:
+        decision, reason, data = validate_image(data, img_url)
+        if decision == _VREJECT:
+            log.info("REJECT [%s]: %s", reason, img_url[:80])
             continue
+        if decision == _VMANUAL:
+            log.info("MANUAL [%s]: %s — keeping for now", reason, img_url[:80])
 
         # Perceptual duplicate check (catches same image at different CDN sizes)
         h = _img_hash(data)
@@ -1389,6 +1681,506 @@ def _is_specific_story(title: str) -> bool:
     return any(term in t for term in specific_terms)
 
 
+# ---------------------------------------------------------------------------
+# 5c. Entity extraction — separates "what's the story" from "where's the image"
+# ---------------------------------------------------------------------------
+
+def extract_product_entities(title: str) -> dict:
+    """
+    Parse a story headline into structured search entities.
+    Returns brand, model, club, nat_team, player, content_type, search_terms.
+    Used to build targeted queries across multiple image sources.
+    """
+    t = title.lower()
+
+    _BRANDS = [
+        "adidas", "nike", "puma", "new balance", "umbro", "castore",
+        "hummel", "macron", "mizuno", "asics", "under armour", "lotto",
+    ]
+    brand = next((b for b in _BRANDS if b in t), None)
+
+    content_type = _story_content_type(title)
+
+    _MODELS = [
+        "predator", "f50", "copa", "mercurial", "phantom", "tiempo",
+        "superfly", "vapor", "future", "ultra", "king", "tekela", "furon",
+        "speedportal", "x speedflow", "icon", "442",
+    ]
+    model = next((m for m in _MODELS if m in t), None)
+
+    _CLUBS: dict[str, str] = {
+        "arsenal": "Arsenal", "liverpool": "Liverpool", "chelsea": "Chelsea",
+        "manchester united": "Manchester United", "man utd": "Manchester United",
+        "manchester city": "Manchester City", "man city": "Manchester City",
+        "tottenham": "Tottenham", "spurs": "Tottenham",
+        "real madrid": "Real Madrid", "barcelona": "Barcelona",
+        "psg": "PSG", "paris saint-germain": "PSG",
+        "juventus": "Juventus", "inter milan": "Inter Milan",
+        "ac milan": "AC Milan", "bayern": "Bayern Munich",
+        "dortmund": "Dortmund", "atletico": "Atletico Madrid",
+        "napoli": "Napoli", "roma": "AS Roma",
+        "lyon": "Lyon", "galatasaray": "Galatasaray",
+        "copenhagen": "Copenhagen",
+    }
+    club = next((v for k, v in _CLUBS.items() if k in t), None)
+
+    _NAT: dict[str, str] = {
+        "argentina": "Argentina", "brazil": "Brazil", "france": "France",
+        "england": "England", "germany": "Germany", "portugal": "Portugal",
+        "spain": "Spain", "italy": "Italy", "mexico": "Mexico",
+        "japan": "Japan", "netherlands": "Netherlands",
+        "usa": "USA", "colombia": "Colombia",
+    }
+    nat_team = next((v for k, v in _NAT.items() if k in t), None)
+
+    _PLAYERS: dict[str, str] = {
+        "messi": "Messi", "ronaldo": "Ronaldo", "mbappe": "Mbappe",
+        "haaland": "Haaland", "bellingham": "Bellingham", "vinicius": "Vinicius",
+        "saka": "Saka", "salah": "Salah", "yamal": "Yamal", "pedri": "Pedri",
+        "neymar": "Neymar", "kane": "Kane", "kaka": "Kaka",
+        "de bruyne": "De Bruyne", "rodri": "Rodri",
+        "wales bonner": "Wales Bonner", "travis scott": "Travis Scott",
+        "someone somewhere": "Someone Somewhere",
+    }
+    player = next((v for k, v in _PLAYERS.items() if k in t), None)
+
+    # Build search terms, most specific first
+    brand_q  = (brand or "").replace(" ", "")
+    team     = club or nat_team
+    ctype_q  = "boots" if content_type == "boot" else "kit"
+    terms: list[str] = []
+
+    if player and model:
+        terms.append(f"{player} {model} football")
+    if brand_q and model and player:
+        terms.append(f"{brand_q} {model} {player}")
+    if brand_q and model:
+        terms.append(f"{brand_q} {model} football {ctype_q}")
+    if team and brand_q:
+        terms.append(f"{brand_q} {team} {ctype_q}")
+    elif team:
+        terms.append(f"{team} {ctype_q}")
+    fallback = _build_search_query(title)
+    if fallback not in terms:
+        terms.append(fallback)
+
+    return {
+        "brand":        brand,
+        "model":        model,
+        "club":         club,
+        "nat_team":     nat_team,
+        "player":       player,
+        "content_type": content_type,
+        "search_terms": terms[:5],
+        "raw_title":    title,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 5d. Source tier constants + per-source scrapers
+# ---------------------------------------------------------------------------
+
+# Tier A — Official brand/club press rooms: guaranteed zero watermark, high res
+# Tier B — Editorial / community: usually clean, corner watermark ok
+# Tier C — Leak aggregators: body watermarks common, often still useful
+_SRC_TIER_A = "A"
+_SRC_TIER_B = "B"
+_SRC_TIER_C = "C"
+
+# Reddit subreddits by content type
+_REDDIT_BOOT_SUBS = ["bootroom", "footballboots", "WEPES_Boots"]
+_REDDIT_KIT_SUBS  = ["soccerjerseys", "footballkits"]
+
+# Reddit user-agent must look like a real script per their ToS
+_REDDIT_UA = (
+    "footy-culture-bot/0.1 "
+    "(educational Instagram football culture page; contact via repo)"
+)
+
+
+def _scrape_reddit_images(query: str, subreddits: "list[str]") -> "list[dict]":
+    """
+    Reddit JSON API — no auth needed for public search.
+    Community posts often contain original photography (zero watermarks).
+    Returns list of candidate dicts with url, source_name, source_tier.
+    """
+    sub_filter = " OR ".join(f"subreddit:{s}" for s in subreddits)
+    try:
+        resp = requests.get(
+            "https://www.reddit.com/search.json",
+            params={
+                "q":    f"{query} ({sub_filter})",
+                "sort": "new",
+                "t":    "month",
+                "type": "link",
+                "limit": 25,
+            },
+            headers={"User-Agent": _REDDIT_UA},
+            timeout=12,
+        )
+        if resp.status_code == 429:
+            log.debug("Reddit rate limited — skipping")
+            return []
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        log.debug("Reddit search error: %s", exc)
+        return []
+
+    candidates: list[dict] = []
+    for post in data.get("data", {}).get("children", []):
+        pd = post.get("data", {})
+        # Quality gate: ignore low-score posts (spam/reposts)
+        if pd.get("score", 0) < 3:
+            continue
+
+        url = pd.get("url", "")
+        # Direct image links
+        if url.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
+            pass
+        elif "i.redd.it" in url or "i.imgur.com" in url:
+            pass
+        else:
+            # Try Reddit preview (medium resolution but usually works)
+            preview = (pd.get("preview", {}).get("images") or [{}])[0]
+            src = preview.get("source", {})
+            url = src.get("url", "").replace("&amp;", "&")
+            if not url:
+                continue
+
+        candidates.append({
+            "url":         url,
+            "source_name": f"reddit/r/{pd.get('subreddit', '?')}",
+            "source_tier": _SRC_TIER_B,
+            "reddit_score": pd.get("score", 0),
+        })
+
+    log.debug("Reddit: %d candidate URLs for %r", len(candidates), query[:50])
+    return candidates[:6]
+
+
+def _scrape_soccerbible_images(query: str) -> "list[dict]":
+    """
+    SoccerBible uses official brand press photos on product articles.
+    Grab their og:images — Tier B (editorial, generally clean).
+    """
+    candidates: list[dict] = []
+    try:
+        search_url = "https://www.soccerbible.com/?s=" + urllib.parse.quote(query)
+        resp = requests.get(search_url, headers=HEADERS, timeout=12)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        # Hit each result article, fetch its og:image
+        for article in soup.select("article")[:5]:
+            link = article.find("a", href=True)
+            if not link or "soccerbible.com" not in link["href"]:
+                continue
+            try:
+                art_resp = requests.get(link["href"], headers=HEADERS, timeout=10)
+                art_soup = BeautifulSoup(art_resp.text, "html.parser")
+                og = art_soup.find("meta", property="og:image")
+                if og and og.get("content"):
+                    candidates.append({
+                        "url":         og["content"],
+                        "source_name": "soccerbible",
+                        "source_tier": _SRC_TIER_B,
+                    })
+                    if len(candidates) >= 3:
+                        break
+            except Exception:
+                pass
+    except Exception as exc:
+        log.debug("SoccerBible scrape failed: %s", exc)
+
+    return candidates
+
+
+def _scrape_hypebeast_images(query: str) -> "list[dict]":
+    """
+    Hypebeast Football section — good source for collab/limited boot drops.
+    Uses brand press photos; Tier B.
+    """
+    candidates: list[dict] = []
+    try:
+        search_url = (
+            "https://hypebeast.com/search?q="
+            + urllib.parse.quote(query + " football")
+        )
+        resp = requests.get(search_url, headers=HEADERS, timeout=12)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        for article in soup.select("article, .post-item")[:5]:
+            link = article.find("a", href=True)
+            if not link or "hypebeast.com" not in link.get("href", ""):
+                continue
+            # Extract og:image lazily from article page
+            img_tag = article.find("img", src=True)
+            if img_tag:
+                src = img_tag.get("data-src") or img_tag.get("src", "")
+                if src.startswith("http") and not src.endswith(".svg"):
+                    candidates.append({
+                        "url":         src,
+                        "source_name": "hypebeast",
+                        "source_tier": _SRC_TIER_B,
+                    })
+                    if len(candidates) >= 2:
+                        break
+    except Exception as exc:
+        log.debug("Hypebeast scrape failed: %s", exc)
+
+    return candidates
+
+
+# ---------------------------------------------------------------------------
+# 5e. Candidate download, validation, scoring, and parallel search
+# ---------------------------------------------------------------------------
+
+def _download_and_validate_candidate(cand: dict) -> "dict | None":
+    """
+    Download image URL in a candidate dict, run validate_image(),
+    return enriched dict or None if rejected.
+    """
+    url = cand.get("url", "")
+    raw = _download_image(url, timeout=12)
+    if not raw or len(raw) < 8_000:
+        return None
+
+    decision, reason, processed = validate_image(raw, url)
+    if decision == _VREJECT:
+        log.debug("REJECT [%s] %s: %s", cand.get("source_name"), reason, url[:60])
+        return None
+
+    try:
+        resolution = Image.open(io.BytesIO(processed)).size
+    except Exception:
+        resolution = (0, 0)
+
+    return {
+        **cand,
+        "data":        processed,
+        "resolution":  resolution,
+        "wm_decision": decision,
+        "wm_reason":   reason,
+    }
+
+
+def _score_image_candidate(cand: dict) -> float:
+    """
+    Numeric quality score for a validated candidate image.  Higher = better.
+
+    Weights:
+      Source tier  40 pts  (A → guaranteed clean; C → probably watermarked)
+      Resolution   30 pts  (1 pt per 50px of shortest dimension, cap 30)
+      WM clear     15 pts  (PASS beats MANUAL)
+      Community QS  5 pts  (Reddit upvotes as proxy for photo quality)
+    """
+    tier_pts = {_SRC_TIER_A: 40, _SRC_TIER_B: 25, _SRC_TIER_C: 10}
+    score  = float(tier_pts.get(cand.get("source_tier", _SRC_TIER_C), 0))
+    w, h   = cand.get("resolution", (0, 0))
+    score += min(30.0, min(w, h) / 50)
+    if cand.get("wm_decision") == _VPASS:
+        score += 15.0
+    score += min(5.0, cand.get("reddit_score", 0) / 200)
+    return score
+
+
+def _search_sources_parallel(
+    entities: dict,
+    article_url: "str | None",
+    preferred_url: "str | None",
+    n: int = 3,
+) -> "list[dict]":
+    """
+    Query all image sources in parallel and return validated candidates,
+    highest-scored first.
+
+    Source priority (by tier):
+      Tier A — Brand/club official press (already in RSS scrapers)
+      Tier B — Editorial: Reddit community, SoccerBible, Hypebeast
+      Tier C — Leak aggregators: FootyHeadlines article images
+
+    The parallel fetch means total latency ≈ slowest single source, not sum.
+    """
+    content_type = entities.get("content_type", "general")
+    queries      = entities.get("search_terms") or [_build_search_query(entities["raw_title"])]
+    query        = queries[0]
+
+    # ── Collect raw candidate dicts (URL + metadata) ─────────────────────────
+    url_tasks: list[dict] = []
+
+    # Tier C: FootyHeadlines article (existing scraper — already validated)
+    if article_url and "footyheadlines.com" in article_url:
+        is_kit  = content_type == "kit"
+        fh_imgs = scrape_article_images(article_url, max_images=2, is_kit=is_kit)
+        for img_bytes in fh_imgs:
+            url_tasks.append({
+                "url":          "__preloaded__",
+                "source_name":  "footyheadlines",
+                "source_tier":  _SRC_TIER_C,
+                "_preloaded":   img_bytes,
+            })
+
+    # Tier B: preferred URL from tweet/RSS
+    if preferred_url:
+        url_tasks.append({
+            "url":         preferred_url,
+            "source_name": "tweet_rss",
+            "source_tier": _SRC_TIER_B,
+        })
+
+    # Tier B: Reddit community posts
+    subs = _REDDIT_BOOT_SUBS if content_type == "boot" else _REDDIT_KIT_SUBS
+    url_tasks.extend(_scrape_reddit_images(query, subs)[:4])
+
+    # Tier B: SoccerBible (editorial, usually official brand photos)
+    url_tasks.extend(_scrape_soccerbible_images(query)[:3])
+
+    # Tier B: Hypebeast (collab/limited drops)
+    if content_type == "boot" or "collab" in entities["raw_title"].lower():
+        url_tasks.extend(_scrape_hypebeast_images(query)[:2])
+
+    log.info(
+        "Parallel image search: %d candidates across %d source(s) for %r",
+        len(url_tasks), len({c["source_name"] for c in url_tasks}), query[:60],
+    )
+
+    # ── Download + validate in parallel ──────────────────────────────────────
+    def _process(cand: dict) -> "dict | None":
+        if cand.get("_preloaded"):
+            raw = cand["_preloaded"]
+            decision, reason, processed = validate_image(raw, cand["url"])
+            if decision == _VREJECT:
+                log.debug("FH preloaded REJECT [%s]", reason)
+                return None
+            try:
+                resolution = Image.open(io.BytesIO(processed)).size
+            except Exception:
+                resolution = (0, 0)
+            return {**cand, "data": processed, "resolution": resolution,
+                    "wm_decision": decision, "wm_reason": reason, "_preloaded": None}
+        return _download_and_validate_candidate(cand)
+
+    validated: list[dict] = []
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        futures = {executor.submit(_process, c): c for c in url_tasks}
+        for future in as_completed(futures, timeout=28):
+            try:
+                result = future.result()
+                if result:
+                    validated.append(result)
+            except Exception as exc:
+                log.debug("Candidate future exception: %s", exc)
+
+    # ── Score and rank ────────────────────────────────────────────────────────
+    for c in validated:
+        c["_final_score"] = _score_image_candidate(c)
+
+    validated.sort(key=lambda x: x["_final_score"], reverse=True)
+
+    log.info(
+        "Image search result: %d/%d candidates passed validation",
+        len(validated), len(url_tasks),
+    )
+    for c in validated[:4]:
+        log.info(
+            "  [score=%.0f tier=%s res=%dx%d src=%s]",
+            c["_final_score"], c["source_tier"],
+            c["resolution"][0], c["resolution"][1],
+            c["source_name"],
+        )
+
+    return validated
+
+
+# ---------------------------------------------------------------------------
+# 5f. Pending-recheck queue — "wait for official" logic
+# ---------------------------------------------------------------------------
+
+PENDING_FILE = SCRIPT_DIR / "pending_recheck.json"
+
+
+def _load_pending() -> list[dict]:
+    if PENDING_FILE.exists():
+        try:
+            return json.loads(PENDING_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return []
+
+
+def _save_pending(queue: list[dict]) -> None:
+    PENDING_FILE.write_text(
+        json.dumps(queue, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+
+
+def _queue_recheck(story: dict, reason: str, recheck_hours: int = 24) -> None:
+    """
+    Add a story to the pending recheck queue.
+    On the next run, stories that have aged past their recheck_at timestamp
+    are retried.  This implements the "wait for official press photos" rule:
+    major brand products often get official high-res images within 24-48h.
+    """
+    queue = _load_pending()
+    story_id = story.get("id", _story_id(story.get("title", "")))
+
+    # Don't add duplicates
+    if any(p["id"] == story_id for p in queue):
+        return
+
+    recheck_at = (
+        datetime.now(tz=timezone.utc) + timedelta(hours=recheck_hours)
+    ).isoformat()
+
+    queue.append({
+        "id":          story_id,
+        "title":       story.get("title", ""),
+        "url":         story.get("url", ""),
+        "reason":      reason,
+        "queued_at":   datetime.now(tz=timezone.utc).isoformat(),
+        "recheck_at":  recheck_at,
+        "source":      story.get("source", "FootyHeadlines"),
+    })
+    _save_pending(queue)
+    log.info(
+        "Story queued for recheck in %dh: %r (%s)",
+        recheck_hours, story_id[:50], reason,
+    )
+
+
+def _pop_ready_rechecks() -> list[dict]:
+    """
+    Return and remove stories from the pending queue that are ready to retry
+    (their recheck_at timestamp has passed).
+    """
+    queue = _load_pending()
+    now   = datetime.now(tz=timezone.utc)
+    ready, still_pending = [], []
+    for item in queue:
+        try:
+            recheck_at = datetime.fromisoformat(item["recheck_at"])
+            if recheck_at.tzinfo is None:
+                recheck_at = recheck_at.replace(tzinfo=timezone.utc)
+            if now >= recheck_at:
+                ready.append(item)
+            else:
+                still_pending.append(item)
+        except Exception:
+            still_pending.append(item)
+
+    if ready:
+        _save_pending(still_pending)
+        log.info("Recheck queue: %d stories ready for retry", len(ready))
+
+    return ready
+
+
+# ---------------------------------------------------------------------------
+# 5g. Main multi-source find_images (replaces single-source version)
+# ---------------------------------------------------------------------------
+
 def find_images(
     title: str,
     preferred_url: "str | None" = None,
@@ -1424,22 +2216,15 @@ def find_images(
 
     # ── Priority 2: tweet/RSS attached image ─────────────────────────────────
     if preferred_url:
-        log.info("Trying preferred (tweet/RSS) image: %s", preferred_url)
-        img = _download_image(preferred_url)
-        if img and len(img) > 5000:
-            # Check and crop if landscape
-            try:
-                im = Image.open(io.BytesIO(img))
-                if im.width / im.height > 1.35:
-                    crop_w = im.width // 2
-                    im = im.crop((0, 0, crop_w, im.height))
-                    buf = io.BytesIO()
-                    im.convert("RGB").save(buf, "JPEG", quality=92)
-                    img = buf.getvalue()
-            except Exception:
-                pass
-            collected.append(img)
-            log.info("Preferred image added.")
+        log.info("Trying preferred (tweet/RSS) image: %s", preferred_url[:80])
+        raw = _download_image(preferred_url)
+        if raw and len(raw) > 5000:
+            decision, reason, processed = validate_image(raw, preferred_url)
+            if decision == _VREJECT:
+                log.info("Preferred image REJECT [%s]: %s", reason, preferred_url[:60])
+            else:
+                collected.append(processed)
+                log.info("Preferred image added (%s).", decision)
 
     if len(collected) >= n:
         return collected[:n]
@@ -1520,7 +2305,7 @@ def generate_post_image(
             headline=headline,
             category=category,
             image_path=tmp_bg,
-            size="portrait",
+            size="auto",          # resolves square for BOOT LAUNCH, portrait otherwise
             output_path=out_path,
             focal_point="center",
         )
@@ -1555,10 +2340,10 @@ def generate_carousel(
     Returns a list of file paths (at least 1 on success, empty on error).
     """
     if not image_bytes_list:
-        # No images — one clean dark-background branded card
-        log.info("No images — generating dark placeholder card.")
-        path = generate_post_image(headline, category, None)
-        return [path] if path else []
+        # No qualifying images — skip rather than post a dark placeholder.
+        # "Better to post nothing today than post mid quality always."
+        log.warning("No qualifying images — skipping post entirely (no dark placeholder).")
+        return []
 
     paths: list[str] = []
     for i, img_bytes in enumerate(image_bytes_list[:max_slides], start=1):
@@ -1846,11 +2631,14 @@ def main() -> None:
     fh_stories     = scrape_stories()
     nitter_stories = scrape_nitter()
     rss_stories    = scrape_rss_feeds()
+    press_stories  = scrape_brand_press_rooms()
 
-    all_stories = fh_stories + nitter_stories + rss_stories
+    all_stories = fh_stories + nitter_stories + rss_stories + press_stories
     log.info(
-        "Total candidates — FootyHeadlines: %d  Nitter: %d  RSS: %d  Combined: %d",
-        len(fh_stories), len(nitter_stories), len(rss_stories), len(all_stories),
+        "Total candidates — FootyHeadlines: %d  Nitter: %d  RSS: %d  "
+        "BrandPress: %d  Combined: %d",
+        len(fh_stories), len(nitter_stories), len(rss_stories),
+        len(press_stories), len(all_stories),
     )
 
     if not all_stories:
@@ -1925,38 +2713,51 @@ def main() -> None:
         log.info("No stories scored ≥7. Nothing to post this run.")
         return
 
-    story = candidates[0]
-    log.info(
-        "Selected story (score=%d): %r  source=%s  age=%d days",
-        story["_score"],
-        story["title"],
-        story.get("source", "FootyHeadlines"),
-        story["age_days"],
-    )
+    # ── Try candidates in score order; skip if no qualifying images ───────────
+    story = None
+    category = hype_headline = caption = None
+    images_bytes: list[bytes] = []
 
-    # ── Prepare content ───────────────────────────────────────────────────────
-    category = pick_category(story["title"])
-    raw_headline = format_headline(story["title"])
-    hype_headline = inject_hype(raw_headline, category)
-    caption = build_caption(story["title"], category, article_url=story.get("url"))
+    for attempt, cand in enumerate(candidates, start=1):
+        log.info(
+            "Trying candidate %d/%d (score=%d): %r  source=%s  age=%d days",
+            attempt, len(candidates),
+            cand["_score"], cand["title"],
+            cand.get("source", "FootyHeadlines"),
+            cand["age_days"],
+        )
+        _cat          = pick_category(cand["title"])
+        _raw          = format_headline(cand["title"])
+        _hype         = inject_hype(_raw, _cat)
+        _caption      = build_caption(cand["title"], _cat, article_url=cand.get("url"))
+        _preferred    = cand.get("tweet_image")
+        _imgs         = find_images(
+            cand["title"],
+            preferred_url=_preferred,
+            article_url=cand.get("url"),
+            n=3,
+        )
+        if _imgs:
+            story, category, hype_headline, caption, images_bytes = (
+                cand, _cat, _hype, _caption, _imgs
+            )
+            log.info("  → Selected: %r (%d image(s))", cand["title"][:60], len(_imgs))
+            break
+        else:
+            log.warning(
+                "  → No qualifying images for %r — trying next candidate.",
+                cand["title"][:60]
+            )
+
+    if story is None:
+        log.warning("All candidates exhausted with no qualifying images. Nothing to post.")
+        return
 
     log.info("Category: %s", category)
     log.info("Headline (hype): %r", hype_headline)
     log.info("Caption:\n%s", caption)
 
-    # ── Find up to 3 accurate images for carousel ────────────────────────────
-    preferred_img_url: "str | None" = story.get("tweet_image")
-    images_bytes = find_images(
-        story["title"],
-        preferred_url=preferred_img_url,
-        article_url=story.get("url"),
-        n=3,
-    )
-
-    if not images_bytes:
-        log.warning("No images found — will use dark placeholder background.")
-
-    # ── Generate carousel (1 card per image, or 1 dark placeholder) ──────────
+    # ── Generate carousel (1 card per image) ────────────────────────────────
     slide_paths = generate_carousel(hype_headline, category, images_bytes)
 
     if not slide_paths:
@@ -1968,8 +2769,8 @@ def main() -> None:
     # ── Post to Instagram (or skip if dry-run) ────────────────────────────────
     if dry_run:
         log.info("[DRY RUN] Skipping Instagram post. Cards: %s", slide_paths)
-    elif not INSTAGRAM_USERNAME or not INSTAGRAM_PASSWORD:
-        log.warning("INSTAGRAM_USERNAME/PASSWORD not set — skipping Instagram post.")
+    elif not INSTAGRAM_SESSION_FILE.exists() and (not INSTAGRAM_USERNAME or not INSTAGRAM_PASSWORD):
+        log.warning("No session file and no credentials — skipping Instagram post.")
     else:
         success = post_to_instagram(slide_paths, caption)
         if not success:
