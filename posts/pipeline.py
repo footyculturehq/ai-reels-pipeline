@@ -850,14 +850,14 @@ def format_headline(title: str) -> str:
 
 
 _HYPE_WORDS = {
-    "LEAKED":       ["LEAKED:", "FIRST LOOK:", "EXCLUSIVE:"],
-    "SPOTTED":      ["SPOTTED:", "CAUGHT:", "SEEN:"],
-    "KIT DROP":     ["CLEAN.", "INSANE.", "NEW:"],
-    "BOOT LAUNCH":  ["STRIKING.", "NEW:", "INSANE."],
-    "SIGNING":      ["BREAKING:", "OFFICIAL:", "CONFIRMED:"],
-    "COLLAB":       ["INSANE.", "MASSIVE:", "CLEAN."],
-    "VAULT":        ["CLEAN.", "CLASSIC.", "VAULT:"],
-    "FOOTBALL":     ["NEW:", "BREAKING:", "LATEST:"],
+    "LEAKED":      ["LEAKED:", "FIRST LOOK:", "EXCLUSIVE:", "LEAKED:"],
+    "SPOTTED":     ["SPOTTED:", "CAUGHT:", "ON FEET:"],
+    "KIT DROP":    ["CLEAN NEW", "INSANE NEW", "OFFICIAL:"],
+    "BOOT LAUNCH": ["FIRST LOOK:", "INSANE NEW", "OFFICIAL:"],
+    "SIGNING":     ["BREAKING:", "OFFICIAL:", "CONFIRMED:"],
+    "COLLAB":      ["INSANE NEW", "MASSIVE:", "EXCLUSIVE:"],
+    "VAULT":       ["CLASSIC NEW", "VAULT:", "BACK:"],
+    "FOOTBALL":    ["BREAKING:", "OFFICIAL:", "LATEST:"],
 }
 
 
@@ -876,36 +876,93 @@ def inject_hype(headline: str, category: str) -> str:
 # 4. Build Instagram caption (spec format)
 # ---------------------------------------------------------------------------
 
-def build_caption(title: str, category: str) -> str:
+def _build_context_sentence(title: str, category: str, article_url: str = None) -> str:
+    """
+    Generate 1-2 sentences of genuine context from the title tokens.
+    Tries to extract brand, model, club, colourway, and national team data
+    to produce a sentence that adds info the headline doesn't already say.
+    Falls back to category-level template if nothing specific is found.
+    """
+    t = title.lower()
+
+    # Extract key entities
+    brand = next((b for b in ["adidas", "nike", "puma", "new balance", "umbro",
+                               "under armour", "castore", "mizuno", "asics"]
+                  if b in t), None)
+    club = next((c for c in ["arsenal", "liverpool", "chelsea", "manchester united",
+                              "man utd", "manchester city", "real madrid", "barcelona",
+                              "psg", "juventus", "bayern", "inter milan", "ac milan",
+                              "tottenham", "napoli", "dortmund"]
+                 if c in t), None)
+    nat = next((n for n in ["argentina", "brazil", "france", "england", "germany",
+                             "portugal", "spain", "italy", "mexico", "japan"]
+                if n in t), None)
+    player = next((p for p in ["mbappe", "haaland", "salah", "ronaldo", "messi",
+                                "bellingham", "vinicius", "saka", "kane", "pedri",
+                                "yamal", "rashford"]
+                   if p in t), None)
+    is_leaked  = any(w in t for w in ["leaked", "leak"])
+    is_retro   = any(w in t for w in ["retro", "vault", "reissue", "1993", "1994",
+                                       "1998", "remake", "classic", "archive"])
+    is_collab  = any(w in t for w in ["collab", " x ", "collaboration"])
+    is_spotted = any(w in t for w in ["spotted", "training", "on feet", "worn"])
+
+    # Build a specific sentence where possible
+    parts = []
+    if is_retro and brand and nat:
+        parts.append(f"{brand.title()} bring back the {nat.title()} colourway in full — one of the most iconic looks in football history.")
+    elif is_retro and brand:
+        parts.append(f"{brand.title()} going deep into the archive for this one. The retro faithful are eating.")
+    elif is_collab and brand:
+        parts.append(f"A full brand collab — {brand.title()} linking up for what could be the drop of the season.")
+    elif is_spotted and player:
+        parts.append(f"{player.title()} caught in these before the official reveal — the leaks always land here first.")
+    elif is_leaked and nat and brand:
+        parts.append(f"The {nat.title()} {brand.title()} colourway surfaces before the official announcement — details and release info at the link in bio.")
+    elif is_leaked and club and brand:
+        parts.append(f"The {club.title()} x {brand.title()} colourway surfaces before the official announcement.")
+    elif is_leaked:
+        parts.append("Leaked before the brand is ready to say a word — full details at the link in bio.")
+    elif club and category == "KIT DROP":
+        parts.append(f"The {club.title()} kit is now official. Full release info and where to buy at the link in bio.")
+    elif category == "BOOT LAUNCH" and brand:
+        parts.append(f"New {brand.title()} colourway just dropped. Pricing and availability at the link in bio.")
+    elif category == "SIGNING":
+        parts.append("The deal is confirmed. More at the link in bio.")
+    else:
+        fallback = {
+            "LEAKED":      "Leaked before the brand is ready to announce — full story at the link in bio.",
+            "SPOTTED":     "Caught on feet before the official reveal. The leaks always come here first.",
+            "KIT DROP":    "The new kit is official. Full details and release info at the link in bio.",
+            "BOOT LAUNCH": "New colourway just dropped. Pricing and where to buy at the link in bio.",
+            "SIGNING":     "The deal is done. More details at the link in bio.",
+            "COLLAB":      "The collab is real. Full details in bio.",
+            "VAULT":       "The classic is back. Retro lovers, this one's for you.",
+            "FOOTBALL":    "Full story at the link in bio. Follow for daily drops.",
+        }
+        parts.append(fallback.get(category, fallback["FOOTBALL"]))
+
+    return " ".join(parts)
+
+
+def build_caption(title: str, category: str, article_url: str = None) -> str:
     """
     Format per spec:
       Line 1: Headline
       Line 2: blank
-      Line 3: 1–2 sentence context
+      Line 3: 1–2 sentence context (entity-aware)
       Line 4: blank
       Line 5: CTA
       Line 6: blank
       Line 7: Hashtags (max 8)
     """
-    import hashlib
-
     t = title.lower()
 
     # ── Line 1: headline ─────────────────────────────────────────────────────
     headline_line = title
 
-    # ── Line 3: 1-2 sentence context ─────────────────────────────────────────
-    context_map = {
-        "LEAKED":       "Leaked before the brand is ready to announce — hit the link in bio for the full story.",
-        "SPOTTED":      "Caught on feet before the official reveal. The leaks always come here first.",
-        "KIT DROP":     "The new kit is official. Full details and release info at the link in bio.",
-        "BOOT LAUNCH":  "New colourway just hit. Check the link in bio for pricing and release date.",
-        "SIGNING":      "The deal is done. More details at the link in bio.",
-        "COLLAB":       "The collab is real and it looks insane. Full details in bio.",
-        "VAULT":        "The classic is back. Retro lovers, this one's for you.",
-        "FOOTBALL":     "Full story at the link in bio. Follow for daily kit and boot news.",
-    }
-    context = context_map.get(category, context_map["FOOTBALL"])
+    # ── Line 3: context ───────────────────────────────────────────────────────
+    context = _build_context_sentence(title, category, article_url)
 
     # ── Line 5: CTA ───────────────────────────────────────────────────────────
     cta = "🔔 Drop alerts → link in bio"
@@ -1050,11 +1107,11 @@ def search_google_image(query: str) -> "bytes | None":
 def _upgrade_blogger_url(url: str) -> str:
     """
     FootyHeadlines is hosted on Blogger / Google CDN.
-    URLs contain a size token like /s400/, /s640/, /s1600/.
-    Replace with /s1200/ to get a high-resolution version
-    (s1600 is sometimes blocked; s1200 is reliably served).
+    URLs contain a size token like /s400/, /s640/, /s1200/.
+    Replace with /s0/ to request the ORIGINAL full-resolution image.
+    /s0/ is Google's "no resize" token — returns the master asset.
     """
-    return re.sub(r'/s\d{2,4}(-[^/]*)/', '/s1200/', url)
+    return re.sub(r'/s\d{2,4}(-[^/]*)/', '/s0/', url)
 
 
 def _img_hash(data: bytes) -> str:
@@ -1079,9 +1136,11 @@ def _process_image_bytes(data: bytes, img_url: str) -> "bytes | None":
         img_check = Image.open(io.BytesIO(data))
         w, h = img_check.size
 
-        # Skip thumbnails / icons (related-post widgets, ads, etc.)
-        if w < 500 or h < 400:
-            log.debug("Skipping small image (%dx%d): %s", w, h, img_url[:70])
+        # Enforce minimum resolution — reject thumbnails and low-res sources.
+        # /s0/ Blogger CDN gives original; 900px is the floor so product detail
+        # stays sharp when upscaled to 1080px output.
+        if w < 900 or h < 700:
+            log.debug("Skipping low-res image (%dx%d): %s", w, h, img_url[:70])
             return None
 
         # Landscape / split-panel → crop to left half (one clean product view)
@@ -1143,10 +1202,10 @@ def scrape_article_images(url: str, max_images: int = 4,
         if u not in found_urls:
             found_urls.append(u)
 
-    # ── 1. og:image (hero shot — always collected) ────────────────────────────
+    og_url: "str | None" = None
     og = soup.find("meta", property="og:image")
     if og and og.get("content"):
-        _add(og["content"])
+        og_url = og["content"]
 
     if not is_kit:
         # ── Boot/general: grab <a href> in-article images ──────────────────────
@@ -1157,6 +1216,11 @@ def scrape_article_images(url: str, max_images: int = 4,
         # thumbnails immediately follow.  Cap at 1 <a> link to stay in the main
         # content zone — og:image (hero) + 1 product close-up = 2 clean slides.
         # (Strategy B / <img> tag scan was removed; it picked up related posts.)
+        # Boot/general: ONLY use <a href> in-article images (official brand press
+        # photos — clean, no watermark).  The og:image is footyheadlines' own
+        # composite render and has their watermark baked in — skip it entirely.
+        # Cap at 1: footyheadlines boot articles have 1 product image link before
+        # related-post thumbnails begin — 2nd link always hits related content.
         a_link_cap   = 1
         a_link_count = 0
         for a_tag in soup.find_all("a", href=True):
@@ -1171,7 +1235,15 @@ def scrape_article_images(url: str, max_images: int = 4,
                 _add(href)
                 if len(found_urls) > before:
                     a_link_count += 1
+
+        # Fallback: if no clean <a href> images found, use og:image as last resort
+        if not found_urls and og_url:
+            log.debug("No <a href> images found — falling back to og:image")
+            _add(og_url)
     else:
+        # Kit story: og:image only (in-article renders have baked-in watermarks)
+        if og_url:
+            _add(og_url)
         log.info("Kit story — skipping in-article renders (watermarked). "
                  "Using og:image only; extra slides from Google.")
 
@@ -1730,7 +1802,7 @@ def main() -> None:
         category       = pick_category(force_title)
         raw_headline   = format_headline(force_title)
         hype_headline  = inject_hype(raw_headline, category)
-        caption        = build_caption(force_title, category)
+        caption        = build_caption(force_title, category, article_url=force_url)
         log.info("Category: %s  Headline: %r", category, hype_headline)
         images_bytes   = find_images(force_title, article_url=force_url, n=3)
         slide_paths    = generate_carousel(hype_headline, category, images_bytes)
@@ -1866,7 +1938,7 @@ def main() -> None:
     category = pick_category(story["title"])
     raw_headline = format_headline(story["title"])
     hype_headline = inject_hype(raw_headline, category)
-    caption = build_caption(story["title"], category)
+    caption = build_caption(story["title"], category, article_url=story.get("url"))
 
     log.info("Category: %s", category)
     log.info("Headline (hype): %r", hype_headline)
