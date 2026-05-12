@@ -20,11 +20,11 @@ from datetime import datetime
 from pathlib import Path
 
 try:
-    from PIL import Image, ImageDraw, ImageFont, ImageEnhance, ImageFilter
+    from PIL import Image, ImageChops, ImageDraw, ImageFont, ImageEnhance, ImageFilter
 except ImportError:
     import subprocess
     subprocess.run([sys.executable, "-m", "pip", "install", "Pillow"], check=True)
-    from PIL import Image, ImageDraw, ImageFont, ImageEnhance, ImageFilter
+    from PIL import Image, ImageChops, ImageDraw, ImageFont, ImageEnhance, ImageFilter
 
 SCRIPT_DIR = Path(__file__).parent
 OUT_DIR    = SCRIPT_DIR / "output"
@@ -173,6 +173,59 @@ def _wrap_headline(draw, text: str, max_w: int, max_lines: int = 2
 
 
 # ---------------------------------------------------------------------------
+# Letterbox helpers
+# ---------------------------------------------------------------------------
+
+def _detect_dark_background(photo: Image.Image, threshold: float = 0.22) -> bool:
+    """
+    Returns True if the image has a predominantly dark background.
+    Samples 6×6 crops from each corner — typically where the bg is exposed on
+    product shots (boots/kits on white/black studio backgrounds).
+    """
+    try:
+        rgb = photo.convert("RGB")
+        w, h = rgb.size
+        r = min(40, w // 6, h // 6)
+        corners = [
+            (0, 0, r, r),           (w - r, 0, w, r),
+            (0, h - r, r, h),       (w - r, h - r, w, h),
+        ]
+        total, count = 0.0, 0
+        for box in corners:
+            region = rgb.crop(box).resize((6, 6), Image.LANCZOS)
+            for cy in range(6):
+                for cx in range(6):
+                    px = region.getpixel((cx, cy))
+                    total += (px[0] + px[1] + px[2]) / (3 * 255)
+                    count += 1
+        return (total / count) < threshold if count else False
+    except Exception:
+        return False
+
+
+def _add_feathered_edges(img: Image.Image, feather_radius: int = 18) -> Image.Image:
+    """
+    Returns RGBA image — edges fade to transparent over feather_radius pixels.
+    Existing alpha (PNG cutouts) is multiplied so cutout shapes are preserved.
+
+    How it works:
+      1. Draw a solid-white rectangle inset by feather_radius on all sides.
+      2. GaussianBlur spreads the white outward, creating a 0→255 gradient mask.
+      3. Multiply the gradient mask with any existing alpha channel.
+    """
+    img_rgba = img.convert("RGBA")
+    w, h = img_rgba.size
+    r = max(1, feather_radius)
+    mask = Image.new("L", (w, h), 0)
+    ImageDraw.Draw(mask).rectangle([r, r, w - r - 1, h - r - 1], fill=255)
+    mask = mask.filter(ImageFilter.GaussianBlur(radius=r * 0.65))
+    # Multiply preserves any pre-existing transparent regions (PNG cutouts)
+    combined = ImageChops.multiply(img_rgba.getchannel("A"), mask)
+    img_rgba.putalpha(combined)
+    return img_rgba
+
+
+# ---------------------------------------------------------------------------
 # Letterbox-with-blur compositor
 # ---------------------------------------------------------------------------
 
@@ -183,6 +236,7 @@ def _letterbox_blur(
     blur_radius: int = 60,
     darken_factor: float = 0.55,
     product_scale: float = 0.82,
+    feather_edges: int = 18,
 ) -> Image.Image:
     """
     Frame a product image into (target_w × target_h) without cropping it.
@@ -190,14 +244,26 @@ def _letterbox_blur(
     Background  = the same image, heavily blurred + darkened + desaturated.
                   Gives a "studio backdrop" feel that matches the product's
                   colour palette automatically.
-    Foreground  = the full product, scaled so its longest dimension fills
-                  product_scale × the relevant canvas dimension, then pasted
-                  in the upper-centre of the frame (leaves room for headline).
+    Foreground  = the full product, scaled to fit, feathered edges so it blends
+                  smoothly into the backdrop.  PNGs with existing transparency
+                  have their cutout preserved; the feather just softens cut edges.
+
+    Dark-bg detection: if the source corners are near-black (metallic/studio
+    render with a dark background) the backdrop darken_factor is pushed lower
+    so the seam between fg and bg is invisible.
 
     Returns a composited RGB Image ready to paste onto the canvas.
     """
-    # ── Background: blur & darken ─────────────────────────────────────────────
-    bg_ratio = photo.width / photo.height
+    has_alpha = photo.mode == "RGBA"
+
+    # ── Match backdrop darkness to source ────────────────────────────────────
+    # Products on dark backgrounds (black studio renders, iridescent boots)
+    # need a dark backdrop — otherwise the letterbox seam is clearly visible.
+    if _detect_dark_background(photo):
+        darken_factor = min(darken_factor, 0.28)
+
+    # ── Background: blur & darken (always work in RGB) ────────────────────────
+    bg_ratio  = photo.width / photo.height
     tgt_ratio = target_w / target_h
 
     if bg_ratio > tgt_ratio:
@@ -207,7 +273,7 @@ def _letterbox_blur(
         new_w = target_w
         new_h = int(new_w / bg_ratio)
 
-    bg = photo.copy().resize((new_w, new_h), Image.LANCZOS)
+    bg = photo.convert("RGB").copy().resize((new_w, new_h), Image.LANCZOS)
     left = (new_w - target_w) // 2
     top  = (new_h - target_h) // 2
     bg   = bg.crop((left, top, left + target_w, top + target_h))
@@ -216,7 +282,7 @@ def _letterbox_blur(
     bg = ImageEnhance.Brightness(bg).enhance(darken_factor)
     bg = ImageEnhance.Color(bg).enhance(0.65)          # desaturate bg slightly
 
-    # ── Foreground: resize to fit, upper-centre ───────────────────────────────
+    # ── Foreground: resize to fit (preserve source mode for RGBA PNGs) ────────
     fg_ratio = photo.width / photo.height
 
     if fg_ratio >= 1:
@@ -234,23 +300,25 @@ def _letterbox_blur(
 
     fg = photo.copy().resize((new_fg_w, new_fg_h), Image.LANCZOS)
 
-    # Trim top 9% of foreground: removes any source URL watermark that lives in
-    # the top-right corner of the original (e.g. "WWW.FOOTYHEADLINES.COM").
-    # For landscape product shots this strip is usually blank background anyway.
+    # Trim top 9%: removes source URL watermarks baked into the top-right corner
     fg_trim = int(new_fg_h * 0.09)
     fg = fg.crop((0, fg_trim, new_fg_w, new_fg_h))
     new_fg_h -= fg_trim
 
-    # Position: horizontally centred, 30% down from top (leaves 70% for text block)
+    # ── Feathered edges ───────────────────────────────────────────────────────
+    # PNGs with a cutout alpha already have transparency; use half the feather
+    # radius so the product boundary stays sharp.  JPEGs (no alpha) get the
+    # full radius so dark/light edges blend into the blurred backdrop.
+    radius = feather_edges // 2 if has_alpha else feather_edges
+    fg = _add_feathered_edges(fg, feather_radius=radius)
+    # fg is now always RGBA after feathering
+
+    # ── Composite ────────────────────────────────────────────────────────────
     paste_x = (target_w - new_fg_w) // 2
     paste_y = int((target_h - new_fg_h) * 0.30)
 
     result = bg.convert("RGB")
-    if photo.mode == "RGBA":
-        result.paste(fg, (paste_x, paste_y), fg)
-    else:
-        result.paste(fg, (paste_x, paste_y))
-
+    result.paste(fg, (paste_x, paste_y), fg)   # RGBA fg → uses alpha as mask
     return result
 
 
@@ -276,12 +344,23 @@ def create_post(
 
     # ── PHOTO: letterbox (boots/wide) or full-bleed crop (kits/portrait) ──────
     if image_path and os.path.exists(image_path):
-        photo = Image.open(image_path).convert("RGB")
+        _raw = Image.open(image_path)
+        # Preserve transparency for PNG cutouts (e.g. official brand press assets)
+        _has_src_alpha = _raw.mode in ("RGBA", "LA") or (
+            _raw.mode == "P" and "transparency" in _raw.info
+        )
+        photo = _raw.convert("RGBA" if _has_src_alpha else "RGB")
 
-        # Boost colour/luminance so hero details (iridescent, metallic) pop
-        photo = ImageEnhance.Color(photo).enhance(1.18)       # +18% saturation
-        photo = ImageEnhance.Brightness(photo).enhance(1.06)  # +6% brightness
-        photo = ImageEnhance.Contrast(photo).enhance(1.04)    # +4% micro-contrast
+        # Boost colour/luminance — operate only on RGB channels to keep alpha intact
+        _rgb = photo.convert("RGB")
+        _rgb = ImageEnhance.Color(_rgb).enhance(1.18)       # +18% saturation
+        _rgb = ImageEnhance.Brightness(_rgb).enhance(1.06)  # +6% brightness
+        _rgb = ImageEnhance.Contrast(_rgb).enhance(1.04)    # +4% micro-contrast
+        if _has_src_alpha:
+            r, g, b = _rgb.split()
+            photo = Image.merge("RGBA", (r, g, b, photo.getchannel("A")))
+        else:
+            photo = _rgb
 
         src_ar  = photo.width / photo.height
         tgt_ar  = W / H

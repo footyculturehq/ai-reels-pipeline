@@ -1082,48 +1082,101 @@ def build_caption(title: str, category: str, article_url: str = None) -> str:
     # ── Line 7: Hashtags (max 8, relevant only) ───────────────────────────────
     hashtags: list[str] = ["#footballculture", "#footballboots"]
 
+    # ── Brand tags — tag ALL brands mentioned (no break) ─────────────────────
     brand_tags = {
-        "nike":        "#nike #nikefootball",
-        "adidas":      "#adidas #adidasfootball",
-        "puma":        "#puma #pumafootball",
-        "new balance": "#newbalance",
-        "umbro":       "#umbro",
-        "under armour":"#underarmour",
-        "castore":     "#castore",
+        "nike":         "#nike #nikefootball",
+        "adidas":       "#adidas #adidasfootball",
+        "puma":         "#puma #pumafootball",
+        "new balance":  "#newbalance #nbfootball",
+        "umbro":        "#umbro",
+        "under armour": "#underarmour",
+        "castore":      "#castore",
+        "hummel":       "#hummel",
+        "macron":       "#macron",
     }
     for brand, ht in brand_tags.items():
         if brand in t:
             hashtags.extend(ht.split())
-            break
+            # No break — tag every brand that appears (collabs etc.)
 
+    # ── Content-type tags ─────────────────────────────────────────────────────
     if any(w in t for w in ["kit", "jersey", "shirt"]):
-        hashtags.append("#kitdrops")
-        hashtags.append("#soccerkits")
+        hashtags += ["#kitdrops", "#soccerkits", "#footballkit"]
     elif any(w in t for w in ["boot", "cleat"]):
-        hashtags.append("#footballboots")
+        hashtags += ["#footballboots", "#footballcleats"]
 
+    # ── Club tags ─────────────────────────────────────────────────────────────
     club_tags = {
-        "arsenal": "#arsenal", "liverpool": "#liverpool",
-        "chelsea": "#chelsea", "manchester united": "#manutd",
-        "manchester city": "#mancity", "real madrid": "#realmadrid",
-        "barcelona": "#fcbarcelona", "psg": "#psg",
-        "juventus": "#juventus", "bayern": "#fcbayern",
+        "arsenal":          "#arsenal",
+        "liverpool":        "#liverpool",
+        "chelsea":          "#chelsea",
+        "manchester united": "#manutd #manchesterunited",
+        "manchester city":  "#mancity",
+        "real madrid":      "#realmadrid",
+        "barcelona":        "#fcbarcelona",
+        "psg":              "#psg",
+        "juventus":         "#juventus",
+        "bayern":           "#fcbayern",
+        "inter milan":      "#intermilan",
+        "ac milan":         "#acmilan",
+        "tottenham":        "#spurs",
+        "dortmund":         "#bvb",
+        "napoli":           "#napoli",
     }
     for club, ht in club_tags.items():
         if club in t:
-            hashtags.append(ht)
-            break
+            hashtags.extend(ht.split())
+            break  # first club only
+
+    # ── Player tags ───────────────────────────────────────────────────────────
+    player_tags = {
+        "mbappe":     "#mbappe #kylianmbappe",
+        "messi":      "#messi #leomessi",
+        "ronaldo":    "#ronaldo #cr7",
+        "haaland":    "#haaland #erlinghaaland",
+        "bellingham": "#bellingham #judebellingham",
+        "vinicius":   "#vinijr #viniciusjunior",
+        "salah":      "#salah #mosalah",
+        "saka":       "#saka #bukalosaka",
+        "kane":       "#kane #harrykane",
+        "yamal":      "#yamal #laminyamal",
+        "pedri":      "#pedri",
+        "neymar":     "#neymar",
+        "rashford":   "#rashford",
+        "de bruyne":  "#debruyne #kevindebruyne",
+    }
+    for player, ht in player_tags.items():
+        if player in t:
+            hashtags.extend(ht.split())
+            break  # first player only (keeps tag block clean)
+
+    # ── National team tags ────────────────────────────────────────────────────
+    nat_tags = {
+        "argentina":  "#argentina #albiceleste",
+        "brazil":     "#brazil #selecao",
+        "france":     "#france #lebleus",
+        "england":    "#england #threelions",
+        "germany":    "#germany #diemannschaft",
+        "portugal":   "#portugal",
+        "spain":      "#spain #laroja",
+        "italy":      "#italy #azzurri",
+        "mexico":     "#mexico #elmitri",
+    }
+    for nat, ht in nat_tags.items():
+        if nat in t:
+            hashtags.extend(ht.split())
+            break  # first national team only
 
     hashtags.append("#footyculturehq")
 
-    # Deduplicate, cap at 8
+    # Deduplicate, cap at 20 (IG best-practice ceiling)
     seen_ht: set[str] = set()
     clean_tags: list[str] = []
     for h in hashtags:
         if h not in seen_ht:
             seen_ht.add(h)
             clean_tags.append(h)
-    tag_block = " ".join(clean_tags[:8])
+    tag_block = " ".join(clean_tags[:20])
 
     return (
         f"{headline_line}\n\n"
@@ -1301,15 +1354,19 @@ def _detect_skin_fraction(img: Image.Image) -> float:
     """
     try:
         small = img.convert("RGB").resize((80, 100))
-        pixels = list(small.getdata())
-        skin = sum(
-            1 for r, g, b in pixels
-            if r > 95 and g > 40 and b > 20
-            and r > g > b
-            and (r - g) > 15
-            and abs(int(r) - int(b)) > 15
-        )
-        return skin / len(pixels) if pixels else 0.0
+        w, h = small.size
+        # Use getpixel loop to avoid Pillow 14 getdata() deprecation
+        skin = 0
+        total = w * h
+        for cy in range(h):
+            for cx in range(w):
+                r, g, b = small.getpixel((cx, cy))
+                if (r > 95 and g > 40 and b > 20
+                        and r > g > b
+                        and (r - g) > 15
+                        and abs(r - b) > 15):
+                    skin += 1
+        return skin / total if total else 0.0
     except Exception:
         return 0.0
 
@@ -1346,7 +1403,9 @@ def _detect_watermark(img: Image.Image) -> "str | None":
         mid_h   = h // 2
 
         def _score(region) -> "tuple[float, float]":
-            pix = list(region.convert("L").getdata())
+            gray = region.convert("L")
+            rw, rh = gray.size
+            pix = [gray.getpixel((x, y)) for y in range(rh) for x in range(rw)]
             if not pix:
                 return 0.0, 0.0
             avg = sum(pix) / len(pix)
@@ -2553,6 +2612,74 @@ def _posts_today(posted: list[dict]) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Instagram Story poster
+# ---------------------------------------------------------------------------
+
+def post_story_to_instagram(story_image_path: str) -> bool:
+    """
+    Post a pre-rendered 1080×1920 Story image to Instagram Stories.
+    Reuses the saved session from INSTAGRAM_SESSION_FILE (same as feed posts).
+    Non-fatal: failures are logged but never crash the pipeline.
+    """
+    if not INSTAGRAM_SESSION_FILE.exists():
+        log.warning("No session file — skipping Story post.")
+        return False
+
+    try:
+        from instagrapi import Client as _Client  # noqa: PLC0415
+    except ImportError:
+        log.error("instagrapi not installed — cannot post Story.")
+        return False
+
+    cl = _Client()
+    cl.set_locale("en_US")
+    cl.set_timezone_offset(0)
+    try:
+        cl.load_settings(str(INSTAGRAM_SESSION_FILE))
+        cl.get_timeline_feed()
+    except Exception as exc:
+        log.warning("Story: session invalid (%s) — skipping.", exc)
+        return False
+
+    # Convert to JPEG (IG Stories require JPEG, not PNG)
+    import tempfile as _tmpfile
+    tmp_path: "str | None" = None
+    try:
+        with Image.open(story_image_path) as _img:
+            # Ensure 9:16 aspect ratio
+            sw, sh = _img.size
+            ideal_h = int(sw * 16 / 9)
+            if sh > ideal_h + 10:
+                _img = _img.crop((0, 0, sw, ideal_h))
+            _, tmp_path = _tmpfile.mkstemp(suffix=".jpg", dir=str(OUTPUT_DIR))
+            _img.convert("RGB").save(tmp_path, "JPEG", quality=95)
+    except Exception as exc:
+        log.warning("Story JPEG conversion failed: %s", exc)
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+        return False
+
+    import time as _time
+    _time.sleep(5)   # brief pause after feed post
+
+    try:
+        media = cl.photo_upload_to_story(path=tmp_path)
+        log.info("Story posted! ID: %s", getattr(media, "pk", "?"))
+        return True
+    except Exception as exc:
+        log.error("Story post failed: %s", exc)
+        return False
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -2776,6 +2903,40 @@ def main() -> None:
         if not success:
             log.error("Instagram post failed. Not marking story as posted.")
             return
+
+    # ── Companion Story with poll (after feed post, non-fatal) ───────────────
+    if not dry_run and slide_paths:
+        try:
+            sys.path.insert(0, str(SCRIPT_DIR))
+            from create_story import (  # noqa: PLC0415
+                create_story as _create_story_card,
+                generate_poll  as _generate_poll,
+                pick_hook      as _pick_hook,
+            )
+            _entities  = extract_product_entities(story["title"])
+            _poll_meta = {
+                "title":  story["title"],
+                "brand":  (_entities.get("brand") or "").title(),
+                "player": (_entities.get("player") or "").title(),
+                "club":   (_entities.get("club") or "").title(),
+                "model":  (_entities.get("model") or "").title(),
+            }
+            _poll      = _generate_poll(category, _poll_meta)
+            _hook      = _pick_hook(category)
+            _story_path = _create_story_card(
+                post_image_path=slide_paths[0],
+                hook=_hook,
+                poll_question=_poll["question"],
+                poll_options=_poll["options"],
+            )
+            log.info("Story card generated: %s", _story_path)
+            _story_ok = post_story_to_instagram(_story_path)
+            if _story_ok:
+                log.info("Story posted successfully.")
+            else:
+                log.warning("Story post skipped/failed — feed post is still live.")
+        except Exception as _exc:
+            log.warning("Story generation/post failed (non-critical): %s", _exc)
 
     # ── Record success ────────────────────────────────────────────────────────
     if not dry_run:
