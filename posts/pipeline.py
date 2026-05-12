@@ -937,11 +937,32 @@ def search_google_image(query: str) -> "bytes | None":
 # 5b. Pexels fallback
 # ---------------------------------------------------------------------------
 
+def _upgrade_blogger_url(url: str) -> str:
+    """
+    FootyHeadlines is hosted on Blogger / Google CDN.
+    URLs contain a size token like /s400/, /s640/, /s1600/.
+    Replace with /s1200/ to get a high-resolution version
+    (s1600 is sometimes blocked; s1200 is reliably served).
+    """
+    return re.sub(r'/s\d{2,4}(-[^/]*)/', '/s1200/', url)
+
+
 def scrape_article_images(url: str, max_images: int = 4) -> "list[bytes]":
     """
     Fetch the actual article page and pull out product images.
-    Returns up to max_images image bytes lists — these are the REAL leaked
-    renders/photos for the story, not generic Pexels stock.
+    Returns up to max_images image-byte chunks — the REAL leaked renders/
+    photos from the article, not generic stock.
+
+    Strategy:
+      1. og:image (usually the hero/cover shot)
+      2. <a href> links inside the article body that point to images — on
+         Blogger these links lead to the full-resolution individual product shot
+         while the <img src> is a scaled thumbnail.
+      3. Fallback to <img src> tags if no <a>-linked images found.
+
+    For landscape/wide images (split panels showing two angles):
+      → Crop to the LEFT HALF so we get one accurate product view
+        rather than discarding the image entirely.
     """
     if "footyheadlines.com" not in url:
         return []
@@ -955,52 +976,106 @@ def scrape_article_images(url: str, max_images: int = 4) -> "list[bytes]":
     soup = BeautifulSoup(resp.text, "html.parser")
     found_urls: list[str] = []
 
-    # og:image is always the hero image — get it first
+    def _add(u: str) -> None:
+        if not u or not u.startswith("http"):
+            return
+        if any(skip in u.lower() for skip in
+               ["logo", "icon", "avatar", "banner", "ad-", "/ads/",
+                "spinner", "loading", "placeholder"]):
+            return
+        u = _upgrade_blogger_url(u)
+        if u not in found_urls:
+            found_urls.append(u)
+
+    # ── 1. og:image (hero shot) ───────────────────────────────────────────────
     og = soup.find("meta", property="og:image")
     if og and og.get("content"):
-        found_urls.append(og["content"])
+        _add(og["content"])
 
-    # All <img> inside the article body
+    # ── 2. Article body — try every known Blogger/CMS selector ──────────────
     article_body = (
-        soup.select_one(".post-content")
-        or soup.select_one("article")
+        soup.select_one(".post-body")          # Blogger default
+        or soup.select_one(".post-content")
         or soup.select_one(".entry-content")
+        or soup.select_one(".article-content")
+        or soup.select_one("article")
+        or soup.select_one("#post-body")
+        or soup.select_one(".story-body")
         or soup.find("main")
     )
-    if article_body:
-        for img_tag in article_body.find_all("img", src=True):
-            src = img_tag["src"]
-            # Skip tiny icons, logos, ads
-            if any(skip in src for skip in ["logo", "icon", "avatar", "banner", "ad-", "/ads/"]):
-                continue
-            if not src.startswith("http"):
-                src = "https://www.footyheadlines.com" + src
-            if src not in found_urls:
-                found_urls.append(src)
 
-    log.info("Article %s — found %d image URLs", url, len(found_urls))
+    # ── Strategy A: <a href> links that wrap <img> (Blogger lazy-load pattern) ─
+    # footyheadlines lazy-loads all images: <img src="data:image/svg+xml,...">
+    # wrapped in <a href="https://blogger.googleusercontent.com/...actual.jpg">.
+    # The page body selector never matches, so we search soup.
+    # CRITICAL: product images appear FIRST in the HTML; related-post thumbnails
+    # come after.  We cap at max_images links to stay in the main content zone.
+    # footyheadlines articles: og:image (hero) + typically 1 product close-up,
+    # then related-post thumbnails immediately after.  Cap at 1 <a> link to avoid
+    # pulling in related-post images (which show unrelated boots/players).
+    # Combined with og:image this gives 2 accurate slides per post.
+    a_link_cap   = 1
+    a_link_count = 0
+    for a_tag in soup.find_all("a", href=True):
+        if a_link_count >= a_link_cap:
+            break
+        if not a_tag.find("img"):          # must wrap an <img>
+            continue
+        href = a_tag["href"]
+        if any(token in href.lower() for token in
+               ["googleusercontent.com", "blogger.com/img", "bp.blogspot"]):
+            before = len(found_urls)
+            _add(href)
+            if len(found_urls) > before:   # actually added (not duplicate)
+                a_link_count += 1
+
+    # ── Strategy B: <img> tags with real src / lazy-load attrs ───────────────
+    # Fallback for non-Blogger hosts or articles where images aren't in <a> links.
+    img_search_root = article_body if article_body else soup
+    for img_tag in img_search_root.find_all("img"):
+        for attr in ("src", "data-src", "data-original",
+                     "data-lazy-src", "data-lazy", "data-delayed-url"):
+            src = img_tag.get(attr, "")
+            if src and not src.startswith("data:"):   # skip svg placeholders
+                _add(src)
+                break
+
+    log.info("Article %s — found %d candidate image URLs", url, len(found_urls))
+
     collected: list[bytes] = []
-    for img_url in found_urls[:max_images * 2]:  # try more than we need
+    for img_url in found_urls[:max_images * 3]:   # try plenty to fill quota
         if len(collected) >= max_images:
             break
         data = _download_image(img_url)
-        if not data or len(data) < 10_000:   # skip tiny/placeholder images
+        if not data or len(data) < 10_000:
             continue
 
-        # ── Skip split-panel / landscape composites ──────────────────────────
-        # footyheadlines og:images are often wide 2-panel shots (two kit angles
-        # side by side).  These look terrible on Instagram and may show the
-        # wrong product in the cropped area.  Only accept images that are
-        # roughly portrait or square (aspect ratio ≤ 1.35).
+        # ── Dimension + quality check ─────────────────────────────────────────
         try:
-            check = Image.open(io.BytesIO(data))
-            ar = check.width / check.height
-            if ar > 1.35:
-                log.debug("Skipping wide/landscape article image (ar=%.2f): %s",
-                          ar, img_url[:70])
+            img_check = Image.open(io.BytesIO(data))
+            w, h = img_check.size
+
+            # Skip thumbnails / icons (related-post widgets, ads, etc.)
+            if w < 500 or h < 400:
+                log.debug("Skipping small image (%dx%d): %s", w, h, img_url[:70])
                 continue
+
+            # Landscape / split-panel → crop to left half (one product view)
+            ar = w / h
+            if ar > 1.35:
+                crop_w = w // 2
+                cropped = img_check.crop((0, 0, crop_w, h))
+                buf = io.BytesIO()
+                cropped.convert("RGB").save(buf, "JPEG", quality=92)
+                data = buf.getvalue()
+                log.debug("Cropped wide article image (ar=%.2f) to portrait half: %s",
+                          ar, img_url[:70])
         except Exception:
-            pass  # can't determine aspect ratio — accept it anyway
+            pass  # can't check — accept as-is
+
+        # De-duplicate: skip if we already have a byte-identical image
+        if data in (c for c in collected):
+            continue
 
         collected.append(data)
         log.info("  Article image %d: %s", len(collected), img_url[:80])
@@ -1094,6 +1169,32 @@ def search_pexels_image(query: str) -> "bytes | None":
     return results[0] if results else None
 
 
+def _is_specific_story(title: str) -> bool:
+    """
+    Return True if the story is about a specific club, player, or product —
+    i.e. Pexels stock photos will almost certainly be the WRONG thing.
+    We should prefer a dark-background placeholder over a mismatched image.
+    """
+    t = title.lower()
+    specific_terms = [
+        # Big clubs
+        "manchester united", "man utd", "arsenal", "liverpool", "chelsea",
+        "manchester city", "man city", "tottenham", "spurs", "real madrid",
+        "barcelona", "psg", "paris saint-germain", "bayern", "juventus",
+        "ac milan", "inter milan", "dortmund", "atletico", "napoli",
+        "brazil", "england", "france", "germany", "argentina",
+        "portugal", "spain", "italy", "mexico",
+        # Big players
+        "mbappe", "haaland", "salah", "ronaldo", "messi", "bellingham",
+        "vinicius", "saka", "kane", "de bruyne", "pedri", "yamal",
+        # Specific boot models
+        "mercurial", "predator", "phantom", "tiempo", "superfly",
+        "copa", "future", "ultra", "king", "tekela", "furon",
+        "f50", "speedportal", "thrasher",
+    ]
+    return any(term in t for term in specific_terms)
+
+
 def find_images(
     title: str,
     preferred_url: "str | None" = None,
@@ -1103,25 +1204,23 @@ def find_images(
     """
     Find up to n images that accurately match the story.
 
-    Priority:
-      1. preferred_url (tweet/RSS attached image) — use as slide 1 if available
-      2. Pexels search with a fact-checked query (kit → kit photos, boot → boot photos)
-      3. Google Custom Search
-      4. Generic fallback
-
-    The query is built from the title with year ranges stripped so we don't
-    search for '26-27 kits' (Pexels has no future kits) and instead search
-    for the actual brand/item.
+    Priority order:
+      1. Actual article images (scraped from footyheadlines page) — always
+         accurate; landscape split-panels are cropped to left half.
+      2. Tweet / RSS attached image (if story came from Nitter/RSS).
+      3. Google Custom Search image.
+      4. Pexels — ONLY for non-specific / generic stories.
+         For stories about a specific club, player, or boot model, Pexels
+         will return the wrong product. In that case we return an empty list
+         so create_post falls back to a clean dark-background card.
     """
     collected: list[bytes] = []
 
-    # ── Priority 1: scrape actual article images (the REAL leaked renders) ───
-    # These are guaranteed to show the correct product — the same images
-    # the article is reporting on. Use these for all carousel slides.
+    # ── Priority 1: scrape actual article images ──────────────────────────────
     if article_url:
         article_imgs = scrape_article_images(article_url, max_images=n)
         if article_imgs:
-            log.info("Using %d article images (actual product renders).", len(article_imgs))
+            log.info("Using %d article images (accurate product renders).", len(article_imgs))
             return article_imgs[:n]
 
     # ── Priority 2: tweet/RSS attached image ─────────────────────────────────
@@ -1129,38 +1228,53 @@ def find_images(
         log.info("Trying preferred (tweet/RSS) image: %s", preferred_url)
         img = _download_image(preferred_url)
         if img and len(img) > 5000:
+            # Check and crop if landscape
+            try:
+                im = Image.open(io.BytesIO(img))
+                if im.width / im.height > 1.35:
+                    crop_w = im.width // 2
+                    im = im.crop((0, 0, crop_w, im.height))
+                    buf = io.BytesIO()
+                    im.convert("RGB").save(buf, "JPEG", quality=92)
+                    img = buf.getvalue()
+            except Exception:
+                pass
             collected.append(img)
-            log.info("Preferred image added as slide 1.")
+            log.info("Preferred image added.")
+
+    if len(collected) >= n:
+        return collected[:n]
 
     # ── Build fact-checked search query ──────────────────────────────────────
     query = _build_search_query(title)
-    log.info("Fact-checked search query: %r  (content type: %s)",
+    log.info("Image search query: %r  (content type: %s)",
              query, _story_content_type(title))
 
-    # ── Google for first specific image ──────────────────────────────────────
+    # ── Priority 3: Google Custom Search ─────────────────────────────────────
     if len(collected) < n and GOOGLE_API_KEY:
         img = search_google_image(query)
         if img:
             collected.append(img)
 
-    # ── Pexels for remaining slides ───────────────────────────────────────────
-    still_need = n - len(collected)
-    if still_need > 0:
-        pexels_imgs = search_pexels_images(query, n=still_need + 1)
-        for img in pexels_imgs:
-            if len(collected) >= n:
-                break
-            collected.append(img)
+    # ── Priority 4: Pexels — ONLY for non-specific stories ───────────────────
+    # Pexels doesn't have new leaked kits or unreleased boots.
+    # Using it for "Arsenal 26-27 Home Kit Leaked" would show a random jersey.
+    # Better to use a dark branded card than post the wrong product.
+    if len(collected) < n:
+        if _is_specific_story(title):
+            log.info(
+                "Specific story — skipping Pexels to avoid image mismatch. "
+                "Will use dark placeholder for missing slides."
+            )
+        else:
+            still_need = n - len(collected)
+            pexels_imgs = search_pexels_images(query, n=still_need + 1)
+            for img in pexels_imgs:
+                if len(collected) >= n:
+                    break
+                collected.append(img)
 
-    # ── Fallback to generic if still empty ───────────────────────────────────
-    if not collected:
-        content_type = _story_content_type(title)
-        fallback = "football boots on pitch" if content_type == "boot" else "football kit player"
-        log.warning("No specific images found — trying generic fallback: %r", fallback)
-        fallback_imgs = search_pexels_images(fallback, n=n)
-        collected.extend(fallback_imgs)
-
-    log.info("Total images collected for carousel: %d", len(collected))
+    log.info("Total images found: %d / %d requested", len(collected), n)
     return collected[:n]
 
 
@@ -1178,9 +1292,11 @@ def generate_post_image(
     headline: str,
     category: str,
     image_bytes: "bytes | None",
+    slide_index: int = 0,
 ) -> "str | None":
     """
     Generate a single magazine-cover post card using create_post.py.
+    slide_index is appended to the filename so carousel slides don't collide.
     Returns the file path, or None on failure.
     """
     sys.path.insert(0, str(SCRIPT_DIR))
@@ -1191,14 +1307,15 @@ def generate_post_image(
         return None
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    suffix = f"_s{slide_index:02d}" if slide_index else ""
     tmp_bg: "str | None" = None
 
     if image_bytes:
-        tmp_bg = str(OUTPUT_DIR / f"_tmp_bg_{ts}.jpg")
+        tmp_bg = str(OUTPUT_DIR / f"_tmp_bg_{ts}{suffix}.jpg")
         with open(tmp_bg, "wb") as f:
             f.write(image_bytes)
 
-    out_path = str(OUTPUT_DIR / f"post_{ts}.png")
+    out_path = str(OUTPUT_DIR / f"post_{ts}{suffix}.png")
     try:
         create_post(
             headline=headline,
@@ -1219,6 +1336,40 @@ def generate_post_image(
                 os.unlink(tmp_bg)
             except Exception:
                 pass
+
+
+# ---------------------------------------------------------------------------
+# 6b. Carousel generator (multiple branded slides, one per image)
+# ---------------------------------------------------------------------------
+
+def generate_carousel(
+    headline: str,
+    category: str,
+    image_bytes_list: "list[bytes]",
+    max_slides: int = 4,
+) -> "list[str]":
+    """
+    Generate one branded post card per image (up to max_slides).
+    Each card uses the same headline/category overlay on a different photo.
+    Falls back to a single dark-background placeholder card if no images.
+
+    Returns a list of file paths (at least 1 on success, empty on error).
+    """
+    if not image_bytes_list:
+        # No images — one clean dark-background branded card
+        log.info("No images — generating dark placeholder card.")
+        path = generate_post_image(headline, category, None)
+        return [path] if path else []
+
+    paths: list[str] = []
+    for i, img_bytes in enumerate(image_bytes_list[:max_slides], start=1):
+        path = generate_post_image(headline, category, img_bytes, slide_index=i)
+        if path:
+            paths.append(path)
+            log.info("Slide %d/%d: %s", i, min(len(image_bytes_list), max_slides), path)
+        else:
+            log.warning("Slide %d failed to generate — skipping.", i)
+    return paths
 
 
 # ---------------------------------------------------------------------------
@@ -1508,35 +1659,34 @@ def main() -> None:
     log.info("Headline (hype): %r", hype_headline)
     log.info("Caption:\n%s", caption)
 
-    # ── Find ONE best image ───────────────────────────────────────────────────
+    # ── Find up to 3 accurate images for carousel ────────────────────────────
     preferred_img_url: "str | None" = story.get("tweet_image")
     images_bytes = find_images(
         story["title"],
         preferred_url=preferred_img_url,
         article_url=story.get("url"),
-        n=1,
+        n=3,
     )
-    image_bytes: "bytes | None" = images_bytes[0] if images_bytes else None
 
-    if not image_bytes:
-        log.warning("No image found — will generate card with dark placeholder background.")
+    if not images_bytes:
+        log.warning("No images found — will use dark placeholder background.")
 
-    # ── Generate single post card ─────────────────────────────────────────────
-    card_path = generate_post_image(hype_headline, category, image_bytes)
+    # ── Generate carousel (1 card per image, or 1 dark placeholder) ──────────
+    slide_paths = generate_carousel(hype_headline, category, images_bytes)
 
-    if not card_path:
+    if not slide_paths:
         log.error("Card generation failed. Aborting.")
         return
 
-    log.info("Card ready: %s", card_path)
+    log.info("Generated %d slide(s): %s", len(slide_paths), slide_paths)
 
     # ── Post to Instagram (or skip if dry-run) ────────────────────────────────
     if dry_run:
-        log.info("[DRY RUN] Skipping Instagram post. Card saved at: %s", card_path)
+        log.info("[DRY RUN] Skipping Instagram post. Cards: %s", slide_paths)
     elif not INSTAGRAM_USERNAME or not INSTAGRAM_PASSWORD:
         log.warning("INSTAGRAM_USERNAME/PASSWORD not set — skipping Instagram post.")
     else:
-        success = post_to_instagram(card_path, caption)
+        success = post_to_instagram(slide_paths, caption)
         if not success:
             log.error("Instagram post failed. Not marking story as posted.")
             return

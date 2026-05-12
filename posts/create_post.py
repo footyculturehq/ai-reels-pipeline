@@ -219,14 +219,28 @@ def create_post(
         draw_ph.rectangle([(0, 0), (W, H)], fill=(15, 15, 15, 255))
 
     # ── TOP VIGNETTE (kills source watermarks, frames the photo) ─────────────
-    # Very subtle dark-to-transparent band across the top ~18% of the card.
-    top_vign_h = int(H * 0.18)
-    top_vign   = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    tv_draw    = ImageDraw.Draw(top_vign)
-    for row in range(top_vign_h):
-        t     = 1 - (row / top_vign_h)          # 1 at top → 0 at bottom
-        alpha = int(160 * (t ** 1.6))            # 160 max (~63% opacity at top)
-        tv_draw.rectangle([(0, row), (W, row + 1)], fill=(0, 0, 0, alpha))
+    # Two-stage overlay at the top:
+    #   Stage 1 (rows 0 – SOLID_H): near-fully opaque black — buries watermarks
+    #   Stage 2 (SOLID_H – FADE_H): smooth gradient from opaque → transparent
+    # Our "FOOTY CULTURE" + boot icon are rendered AFTER this overlay, so they
+    # stay crisp white on the dark background.
+    SOLID_H  = 72            # first 72px fully dark (where watermarks live)
+    FADE_H   = int(H * 0.24) # gradient ends at 24% of card height
+    SOLID_A  = 235           # near-opaque (92%) for the solid band
+
+    top_vign = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    tv_draw  = ImageDraw.Draw(top_vign)
+    # Solid band
+    tv_draw.rectangle([(0, 0), (W, SOLID_H)], fill=(0, 0, 0, SOLID_A))
+    # Fade zone
+    fade_zone = FADE_H - SOLID_H
+    for row in range(fade_zone):
+        t     = 1 - (row / fade_zone)            # 1 at top of fade → 0 at bottom
+        alpha = int(SOLID_A * (t ** 1.2))
+        tv_draw.rectangle(
+            [(0, SOLID_H + row), (W, SOLID_H + row + 1)],
+            fill=(0, 0, 0, alpha),
+        )
     canvas = Image.alpha_composite(canvas, top_vign)
 
     # ── BOTTOM GRADIENT (0% → 72% black) ─────────────────────────────────────
