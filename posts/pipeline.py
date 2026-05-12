@@ -2349,6 +2349,12 @@ def generate_post_image(
         log.error("Could not import create_post: %s", exc)
         return None
 
+    # Import black-box validator alongside the card generator
+    try:
+        from create_post import validate_no_black_boxes  # noqa: PLC0415
+    except Exception:
+        validate_no_black_boxes = None  # type: ignore[assignment]
+
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     suffix = f"_s{slide_index:02d}" if slide_index else ""
     tmp_bg: "str | None" = None
@@ -2359,26 +2365,74 @@ def generate_post_image(
             f.write(image_bytes)
 
     out_path = str(OUTPUT_DIR / f"post_{ts}{suffix}.png")
-    try:
-        create_post(
-            headline=headline,
-            category=category,
-            image_path=tmp_bg,
-            size="auto",          # resolves square for BOOT LAUNCH, portrait otherwise
-            output_path=out_path,
-            focal_point="center",
-        )
-        log.info("Generated post card: %s", out_path)
-        return out_path
-    except Exception as exc:
-        log.error("Post card generation failed: %s", exc, exc_info=True)
-        return None
-    finally:
+
+    # Retry up to 3 times with progressively simpler render flags.
+    # Attempt 1: standard render
+    # Attempt 2: disable TR gradient (plain top vignette only)
+    # Attempt 3: no image at all (dark branded placeholder)
+    retry_flags = [
+        {},
+        {"skip_tr_gradient": True},
+        {"skip_tr_gradient": True, "no_image": True},
+    ]
+    last_exc: "Exception | None" = None
+    for attempt, rflags in enumerate(retry_flags, start=1):
+        img_arg = None if rflags.get("no_image") else tmp_bg
+        _out = out_path if attempt == 1 else out_path.replace(".png", f"_r{attempt}.png")
+        try:
+            create_post(
+                headline=headline,
+                category=category,
+                image_path=img_arg,
+                size="auto",
+                output_path=_out,
+                focal_point="center",
+                render_flags=rflags,
+            )
+        except Exception as exc:
+            log.warning("Post card attempt %d failed: %s", attempt, exc)
+            last_exc = exc
+            continue
+
+        # Validate for black boxes
+        if validate_no_black_boxes is not None:
+            try:
+                from PIL import Image as _PILImage
+                _img_obj = _PILImage.open(_out)
+                ok, issues = validate_no_black_boxes(_img_obj)
+                if not ok:
+                    log.warning(
+                        "Attempt %d: black-box detected in %s — %s",
+                        attempt, _out, issues,
+                    )
+                    if attempt < len(retry_flags):
+                        continue   # try next render config
+                    log.warning("All render attempts had black boxes; using last result.")
+            except Exception as vexc:
+                log.debug("Black-box validation error (ignored): %s", vexc)
+
+        if attempt != 1:
+            # Rename to the canonical output path
+            try:
+                import shutil
+                shutil.move(_out, out_path)
+            except Exception:
+                out_path = _out
+        log.info("Generated post card (attempt %d): %s", attempt, out_path)
         if tmp_bg:
             try:
                 os.unlink(tmp_bg)
             except Exception:
                 pass
+        return out_path
+
+    log.error("Post card generation failed after %d attempts: %s", len(retry_flags), last_exc)
+    if tmp_bg:
+        try:
+            os.unlink(tmp_bg)
+        except Exception:
+            pass
+    return None
 
 
 # ---------------------------------------------------------------------------

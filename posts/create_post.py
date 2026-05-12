@@ -36,9 +36,11 @@ PITCH_BLACK = (0,   0,   0)
 # Instagram 4:5 portrait
 SIZES = {"portrait": (1080, 1350), "square": (1080, 1080)}
 
-# Bottom gradient: starts at 58% down, max 72% opacity
-GRADIENT_START_FRAC = 0.58
-OVERLAY_MAX_ALPHA   = int(255 * 0.72)
+# Bottom gradient: starts at 40% down, max 80% opacity
+# Power 2.5 (ease-in) = nearly invisible until ~65% down → no visible band edge.
+GRADIENT_START_FRAC = 0.40
+OVERLAY_MAX_ALPHA   = int(255 * 0.80)
+GRADIENT_POWER      = 2.5
 
 # Top vignette: short semi-transparent fade just for wordmark legibility
 TOP_VIGN_H     = 110          # gradient covers top 110px
@@ -323,6 +325,82 @@ def _letterbox_blur(
 
 
 # ---------------------------------------------------------------------------
+# Black-box detector
+# ---------------------------------------------------------------------------
+
+def detect_black_boxes(img: Image.Image, threshold: float = 0.07,
+                       min_fill: float = 0.85) -> list[dict]:
+    """Return a list of suspicious solid-dark regions in *img*.
+
+    Uses numpy when available for speed; falls back to a pure-Pillow path.
+    Each returned dict has keys: label, x, y, w, h, mean_brightness, fill_ratio.
+
+    A region is flagged when:
+      • mean brightness < threshold        (very dark on average)
+      • fill ratio (dark px / region px) > min_fill  (almost entirely solid black)
+
+    Only the **hero zone** is inspected — the central column band and middle
+    vertical slice (skipping the top 15 % where the vignette lives and the
+    bottom 28 % where the bottom gradient lives).  This prevents the
+    intentional design gradients from generating false positives.
+
+    Returns [] when no suspicious regions are found.
+    """
+    rgb = img.convert("RGB")
+    W, H = rgb.size
+    boxes = []
+
+    # Hero zone: skip top vignette (≈15%) and bottom gradient (≈28%)
+    hz_top    = int(H * 0.15)
+    hz_bottom = int(H * 0.72)
+    # Horizontal thirds within that band
+    third_w   = W // 3
+
+    def _check_region(x0, y0, x1, y1, label):
+        patch = rgb.crop((x0, y0, x1, y1))
+        pw, ph = patch.size
+        try:
+            import numpy as np
+            arr        = np.array(patch, dtype=np.float32) / 255.0
+            brightness = arr.mean(axis=2)
+            dark_mask  = brightness < threshold
+            fill_ratio = float(dark_mask.mean())
+            mean_b     = float(brightness.mean())
+        except ImportError:
+            dark_px = 0
+            total   = 0
+            sum_b   = 0.0
+            for py in range(0, ph, 4):
+                for px in range(0, pw, 4):
+                    r, g, b = patch.getpixel((px, py))
+                    brt     = (r + g + b) / (3 * 255)
+                    sum_b  += brt
+                    total  += 1
+                    if brt < threshold:
+                        dark_px += 1
+            fill_ratio = dark_px / max(total, 1)
+            mean_b     = sum_b   / max(total, 1)
+
+        if fill_ratio > min_fill:
+            boxes.append(dict(label=label, x=x0, y=y0,
+                              w=x1 - x0, h=y1 - y0,
+                              mean_brightness=round(mean_b, 3),
+                              fill_ratio=round(fill_ratio, 3)))
+
+    # Check left, centre, and right columns of the hero zone
+    _check_region(0,               hz_top, third_w,         hz_bottom, "hero-L")
+    _check_region(third_w,         hz_top, third_w * 2,     hz_bottom, "hero-C")
+    _check_region(third_w * 2,     hz_top, W,               hz_bottom, "hero-R")
+    return boxes
+
+
+def validate_no_black_boxes(img: Image.Image) -> tuple[bool, list[dict]]:
+    """Return (ok, issues).  ok=True means no black boxes detected."""
+    issues = detect_black_boxes(img)
+    return (len(issues) == 0, issues)
+
+
+# ---------------------------------------------------------------------------
 # Main card generator
 # ---------------------------------------------------------------------------
 
@@ -333,7 +411,10 @@ def create_post(
     size: str = "auto",           # "auto" → resolve from CATEGORY_SIZE
     output_path: str = None,
     focal_point: str = "center",
+    render_flags: dict = None,    # runtime overrides: gradient_power, gradient_max_alpha, …
 ) -> str:
+    _flags = render_flags or {}
+
     # ── Canvas size: auto-resolve from category, or use explicit value ─────────
     if size == "auto":
         size = CATEGORY_SIZE.get(category.upper(), "portrait")
@@ -404,24 +485,27 @@ def create_post(
         tv_draw.rectangle([(0, row), (W, row + 1)], fill=(0, 0, 0, alpha))
     canvas = Image.alpha_composite(canvas, top_vign)
 
-    # ── TOP-RIGHT BRAND COVER — opaque black corner to bury any source URL ────
+    # ── TOP-RIGHT WATERMARK COVER — soft 2-D corner gradient (no solid block) ──
     # footyheadlines (and most sport-media CDNs) embed "WWW.SITE.COM" in the
-    # top-right corner of every image.  A 220px wide × 60px tall solid-black
-    # block + a 40px gradient left-edge fade erases it cleanly without killing
-    # the hero image — the top vignette already darkens the very top anyway.
-    TR_W = 260   # cover width (px) — enough for ~20-char URL at small font
-    TR_H = 72    # cover height (px) — tall enough for 2-line URLs at any size
+    # top-right corner.  Instead of a hard opaque rectangle we build a smooth
+    # 2-D falloff: alpha = h_band(col) × v_band(row) so the corners stay dark
+    # while the centre of the image is untouched.
+    # h_band: 0 at left edge of zone → 1 at right canvas edge  (ease-in^1.8)
+    # v_band: 0 at bottom of zone   → 1 at top canvas edge     (ease-in^1.8)
+    TR_W = 300   # horizontal extent of the gradient zone (px)
+    TR_H = 88    # vertical extent of the gradient zone (px)
+    TR_MAX_A = 210   # peak opacity at the very corner (~82%)
     tr_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    tr_draw  = ImageDraw.Draw(tr_layer)
-    # Solid core
-    tr_draw.rectangle([(W - TR_W + 40, 0), (W, TR_H)], fill=(0, 0, 0, 255))
-    # Left-edge fade (40px) so it blends into the vignette
-    for col in range(40):
-        fade_a = int(255 * (col / 40) ** 1.5)
-        tr_draw.rectangle(
-            [(W - TR_W + col, 0), (W - TR_W + col + 1, TR_H)],
-            fill=(0, 0, 0, fade_a),
-        )
+    tr_arr   = tr_layer.load()
+    for row in range(TR_H):
+        v = 1.0 - (row / TR_H)          # 1 at top, 0 at bottom of zone
+        v_band = v ** 1.8
+        for col in range(TR_W):
+            h = (col / TR_W)             # 0 at left of zone, 1 at right (canvas edge)
+            h_band = h ** 1.8
+            alpha = int(TR_MAX_A * h_band * v_band)
+            canvas_col = W - TR_W + col
+            tr_arr[canvas_col, row] = (0, 0, 0, alpha)
     canvas = Image.alpha_composite(canvas, tr_layer)
 
     # ── BOTTOM GRADIENT (transparent → 72% black) ─────────────────────────────
@@ -429,9 +513,11 @@ def create_post(
     grad_h     = H - grad_start
     overlay    = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     ov_draw    = ImageDraw.Draw(overlay)
+    _gpower = _flags.get("gradient_power", GRADIENT_POWER)
+    _gmax   = _flags.get("gradient_max_alpha", OVERLAY_MAX_ALPHA)
     for row in range(grad_h):
         t     = row / grad_h
-        alpha = int(OVERLAY_MAX_ALPHA * (t ** 0.55))
+        alpha = int(_gmax * (t ** _gpower))
         ov_draw.rectangle(
             [(0, grad_start + row), (W, grad_start + row + 1)],
             fill=(0, 0, 0, alpha),
@@ -439,14 +525,14 @@ def create_post(
     canvas = Image.alpha_composite(canvas, overlay)
     draw = ImageDraw.Draw(canvas)
 
-    pad_x = 52
+    pad_x = 56
     pad_y = 44
 
     # ── TOP-LEFT: "FOOTY CULTURE" wordmark — clean text, no icon ─────────────
     wm_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     wm_draw  = ImageDraw.Draw(wm_layer)
-    wm_font  = _font(22, "ui_light")
-    wm_col   = (255, 255, 255, 179)   # white 70%
+    wm_font  = _font(24, "ui_light")
+    wm_col   = (255, 255, 255, 230)   # white 90%
     wm_draw.text((pad_x, pad_y), "FOOTY CULTURE", font=wm_font, fill=wm_col)
     canvas = Image.alpha_composite(canvas, wm_layer)
     draw = ImageDraw.Draw(canvas)
@@ -501,12 +587,12 @@ def create_post(
         draw.text((pad_x, cur_y), line, font=hl_font, fill=WHITE)
         cur_y += line_h
 
-    # ── HANDLE bottom-right, white 55% opacity ────────────────────────────────
+    # ── HANDLE bottom-right, white 70% opacity ────────────────────────────────
     hdl_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     hdl_draw  = ImageDraw.Draw(hdl_layer)
     hdl_x     = W - pad_x - hdl_tw
     hdl_draw.text((hdl_x, hdl_y), hdl_text, font=hdl_font,
-                  fill=(255, 255, 255, 140))   # white 55%
+                  fill=(255, 255, 255, 178))   # white 70%
     canvas = Image.alpha_composite(canvas, hdl_layer)
 
     # ── SAVE ──────────────────────────────────────────────────────────────────

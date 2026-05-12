@@ -28,7 +28,7 @@ jobs:
 
       # ── 3. Dependencies ────────────────────────────────────────────────────
       - name: Install dependencies
-        run: pip install requests beautifulsoup4 Pillow instagrapi feedparser
+        run: pip install requests beautifulsoup4 Pillow instagrapi feedparser numpy
 
       # ── 4. Run pipeline ────────────────────────────────────────────────────
       - name: Run pipeline
