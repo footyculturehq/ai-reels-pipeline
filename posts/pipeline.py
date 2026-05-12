@@ -2755,6 +2755,10 @@ def main() -> None:
         "--force-title", metavar="TITLE", default=None,
         help="Override the headline when using --force-url.",
     )
+    parser.add_argument(
+        "--force-post", action="store_true",
+        help="Bypass the daily post-limit guard (for manual tests).",
+    )
     args = parser.parse_args()
     dry_run: bool = args.dry_run
 
@@ -2806,9 +2810,11 @@ def main() -> None:
     # ── Max posts per day guard ───────────────────────────────────────────────
     today_count = _posts_today(posted)
     log.info("Posts in last 24h: %d / %d max", today_count, MAX_POSTS_PER_DAY)
-    if not dry_run and today_count >= MAX_POSTS_PER_DAY:
+    if not dry_run and not args.force_post and today_count >= MAX_POSTS_PER_DAY:
         log.info("Daily post limit reached (%d). Exiting.", MAX_POSTS_PER_DAY)
         return
+    if getattr(args, "force_post", False):
+        log.info("--force-post: bypassing daily limit guard.")
 
     # ── Scrape all sources ────────────────────────────────────────────────────
     fh_stories     = scrape_stories()
