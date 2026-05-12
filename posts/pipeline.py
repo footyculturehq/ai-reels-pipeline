@@ -2394,8 +2394,9 @@ def generate_post_image(
             last_exc = exc
             continue
 
-        # Validate for black boxes
-        if validate_no_black_boxes is not None:
+        # Validate for black boxes — skip when no image was supplied:
+        # a dark-branded placeholder is intentionally dark, not a render bug.
+        if image_bytes is not None and validate_no_black_boxes is not None:
             try:
                 from PIL import Image as _PILImage
                 _img_obj = _PILImage.open(_out)
@@ -2453,10 +2454,11 @@ def generate_carousel(
     Returns a list of file paths (at least 1 on success, empty on error).
     """
     if not image_bytes_list:
-        # No qualifying images — skip rather than post a dark placeholder.
-        # "Better to post nothing today than post mid quality always."
-        log.warning("No qualifying images — skipping post entirely (no dark placeholder).")
-        return []
+        # No clean images found — generate a single dark-branded placeholder card.
+        # A well-designed dark card with the headline is better than no post at all.
+        log.info("No images available — generating dark-branded placeholder card.")
+        path = generate_post_image(headline, category, None, slide_index=0)
+        return [path] if path else []
 
     paths: list[str] = []
     for i, img_bytes in enumerate(image_bytes_list[:max_slides], start=1):
@@ -2898,6 +2900,11 @@ def main() -> None:
     story = None
     category = hype_headline = caption = None
     images_bytes: list[bytes] = []
+    # Best-scored candidate seen so far (used as dark-placeholder fallback)
+    _best_no_img_cand:    "dict | None" = None
+    _best_no_img_cat:     str           = "FOOTBALL"
+    _best_no_img_hype:    str           = ""
+    _best_no_img_caption: str           = ""
 
     for attempt, cand in enumerate(candidates, start=1):
         log.info(
@@ -2929,10 +2936,28 @@ def main() -> None:
                 "  → No qualifying images for %r — trying next candidate.",
                 cand["title"][:60]
             )
+            # Remember the highest-scored candidate (first one seen) as fallback
+            if _best_no_img_cand is None:
+                _best_no_img_cand    = cand
+                _best_no_img_cat     = _cat
+                _best_no_img_hype    = _hype
+                _best_no_img_caption = _caption
 
     if story is None:
-        log.warning("All candidates exhausted with no qualifying images. Nothing to post.")
-        return
+        # No candidate had a clean image — fall back to a dark-branded placeholder
+        # card for the best-scored story.  Better than posting nothing on a big news day.
+        if _best_no_img_cand is None:
+            log.warning("All candidates exhausted with no qualifying images. Nothing to post.")
+            return
+        log.warning(
+            "All candidates had no clean images. Falling back to dark placeholder for: %r",
+            _best_no_img_cand["title"][:60],
+        )
+        story        = _best_no_img_cand
+        category     = _best_no_img_cat
+        hype_headline = _best_no_img_hype
+        caption      = _best_no_img_caption
+        images_bytes = []   # generate_carousel handles empty list → placeholder
 
     log.info("Category: %s", category)
     log.info("Headline (hype): %r", hype_headline)
