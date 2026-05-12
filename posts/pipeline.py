@@ -1518,8 +1518,11 @@ def post_to_instagram(image_paths: "list[str] | str", caption: str) -> bool:
     To set up: run `python posts/generate_session.py` once on your local
     machine, then commit posts/instagram_session.json to the repo.
     """
-    if not INSTAGRAM_USERNAME or not INSTAGRAM_PASSWORD:
-        log.error("INSTAGRAM_USERNAME or INSTAGRAM_PASSWORD not set in environment.")
+    # Allow session-only mode: if the session file exists we don't need env creds
+    # (the session file was generated locally and contains auth cookies).
+    has_session = INSTAGRAM_SESSION_FILE.exists()
+    if not has_session and (not INSTAGRAM_USERNAME or not INSTAGRAM_PASSWORD):
+        log.error("No instagram_session.json and INSTAGRAM credentials not set.")
         return False
 
     try:
@@ -1713,7 +1716,7 @@ def main() -> None:
         help="Override the headline when using --force-url.",
     )
     args = parser.parse_args()
-    dry_run: bool = args.dry_run or bool(args.force_url)
+    dry_run: bool = args.dry_run
 
     log.info("=== Footy Culture HQ pipeline starting%s ===",
              " [DRY RUN]" if dry_run else "")
@@ -1723,7 +1726,7 @@ def main() -> None:
         force_url   = args.force_url.strip()
         force_title = (args.force_title or force_url.split("/")[-1]
                        .replace("-", " ").replace(".html", "").title())
-        log.info("FORCE URL mode: %s  title=%r", force_url, force_title)
+        log.info("FORCE URL mode: %s  title=%r  dry_run=%s", force_url, force_title, dry_run)
         category       = pick_category(force_title)
         raw_headline   = format_headline(force_title)
         hype_headline  = inject_hype(raw_headline, category)
@@ -1731,11 +1734,29 @@ def main() -> None:
         log.info("Category: %s  Headline: %r", category, hype_headline)
         images_bytes   = find_images(force_title, article_url=force_url, n=3)
         slide_paths    = generate_carousel(hype_headline, category, images_bytes)
-        if slide_paths:
-            log.info("Generated %d slide(s): %s", len(slide_paths), slide_paths)
-            log.info("[DRY RUN] Skipping Instagram post. Cards: %s", slide_paths)
-        else:
+        if not slide_paths:
             log.error("Card generation failed.")
+            return
+        log.info("Generated %d slide(s): %s", len(slide_paths), slide_paths)
+        if dry_run:
+            log.info("[DRY RUN] Skipping Instagram post. Cards: %s", slide_paths)
+        elif not INSTAGRAM_SESSION_FILE.exists() and (not INSTAGRAM_USERNAME or not INSTAGRAM_PASSWORD):
+            log.warning("No session file and no INSTAGRAM credentials — skipping post.")
+        else:
+            success = post_to_instagram(slide_paths, caption)
+            if success:
+                posted = _load_posted()
+                posted.append({
+                    "id": force_url.split("/")[-1].replace(".html", ""),
+                    "title": force_title,
+                    "url": force_url,
+                    "posted_at": datetime.now(tz=timezone.utc).isoformat(),
+                    "tag": category,
+                })
+                _save_posted(posted)
+                log.info("Marked as posted.")
+            else:
+                log.error("Instagram post failed.")
         return
 
     # ── Load history ─────────────────────────────────────────────────────────
