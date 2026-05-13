@@ -1538,8 +1538,53 @@ _VREJECT = "REJECT"
 _VMANUAL = "MANUAL"
 
 # Minimum source resolution (checked AFTER any crop)
-_MIN_SRC_W = 750    # footyheadlines blogspot CDN serves og:images at 800px; 750→1080 is ~1.4x upscale (acceptable)
-_MIN_SRC_H = 500    # at least 500px tall (Twitter Cards are 1200×630 — valid)
+# Source resolution thresholds (checked after any composite crop)
+# HARD reject: below this the upscale artifact is severe.
+_MIN_SRC_W = 750    # footyheadlines blogspot og:images are 800px — 750 gives margin
+_MIN_SRC_H = 500
+
+# Quality advisory thresholds — images in the SOFT zone still post but get a
+# warning logged so we know when to improve the source search.
+_IDEAL_SRC_PX   = 1_400   # px per side — no visible upscale on 1080px canvas
+_SOFT_SRC_PX    = 1_000   # px per side — mild upscale (~1.1–1.4×), acceptable
+_WARN_UPSCALE   = 1.30    # log WARNING when source needs more than 30% upscale
+
+def validate_source_quality(
+    img: "Image.Image",
+    target_canvas: tuple = (1080, 1350),
+) -> tuple[str, str]:
+    """
+    Check whether a source image is sharp enough for the output canvas.
+
+    Returns (decision, reason):
+      "PASS"   — ideal resolution, upscale ≤ 1.3×
+      "SOFT"   — will upscale > 1.3× but still acceptable; try for better source
+      "REJECT" — below hard minimum; unusable
+
+    The pipeline should:
+      PASS   → use as-is
+      SOFT   → log warning, proceed; if Google search has a better option use it
+      REJECT → skip (handled by existing _MIN_SRC_W/_MIN_SRC_H check earlier)
+    """
+    w, h = img.size
+    # Upscale factor = how much we need to enlarge the smallest dimension
+    # to fill 80% of the longest canvas edge (the product fill target).
+    target_fill_px = max(target_canvas) * 0.80
+    src_min_dim    = min(w, h)
+    upscale        = target_fill_px / src_min_dim if src_min_dim else 99
+
+    if w < _MIN_SRC_W or h < _MIN_SRC_H:
+        return "REJECT", f"Below hard minimum: {w}×{h}"
+
+    if upscale > _WARN_UPSCALE:
+        tier = "SOFT" if (w >= _SOFT_SRC_PX and h >= _SOFT_SRC_PX) else "SOFT"
+        return tier, (
+            f"Source {w}×{h} needs {upscale:.2f}× upscale "
+            f"(ideal ≥{_IDEAL_SRC_PX}px/side). Output may be soft."
+        )
+
+    return "PASS", f"Source quality OK: {w}×{h}, upscale {upscale:.2f}×"
+
 
 # Known competitor/site watermarks to reject
 _KNOWN_WATERMARKS = [
@@ -1562,7 +1607,7 @@ def _img_hash(data: bytes) -> str:
     """MD5 of a thumbnail — fast perceptual near-duplicate detector."""
     import hashlib
     try:
-        img = Image.open(io.BytesIO(data)).convert("RGB").resize((32, 32))
+        img = Image.open(io.BytesIO(data)).convert("RGB").resize((32, 32), Image.LANCZOS)
         buf = io.BytesIO()
         img.save(buf, "JPEG", quality=50)
         return hashlib.md5(buf.getvalue()).hexdigest()
@@ -1602,7 +1647,7 @@ def _detect_skin_fraction(img: Image.Image) -> float:
     Returns 0.0–1.0.
     """
     try:
-        small = img.convert("RGB").resize((80, 100))
+        small = img.convert("RGB").resize((80, 100), Image.LANCZOS)
         w, h = small.size
         # Use getpixel loop to avoid Pillow 14 getdata() deprecation
         skin = 0
@@ -1725,6 +1770,13 @@ def validate_image(
     min_h = 450 if (w / h) >= 1.2 else _MIN_SRC_H
     if w < _MIN_SRC_W or h < min_h:
         return _VREJECT, f"Too small after crop: {w}×{h} (min {_MIN_SRC_W}×{min_h})", None
+
+    # ── Rule 2b: Upscale quality advisory ────────────────────────────────────
+    _sq_decision, _sq_reason = validate_source_quality(img)
+    if _sq_decision == "SOFT":
+        log.warning("Source quality SOFT — %s — %s", _sq_reason, img_url[:80])
+    else:
+        log.debug("Source quality: %s", _sq_reason)
 
     # ── Rule 3: Random-person detection ──────────────────────────────────────
     skin = _detect_skin_fraction(img)
@@ -2740,7 +2792,13 @@ def generate_image_slide(image_bytes: bytes, slide_index: int, size: str = "port
         # Subtle colour boost to match branded card aesthetic
         img = _Enh.Color(img).enhance(1.15)
         img = _Enh.Contrast(img).enhance(1.05)
-        img.save(out, "JPEG", quality=92)
+        # Sharpen before save to counter IG compression
+        try:
+            from create_post import apply_pre_upload_sharpen as _sh  # noqa: PLC0415
+            img = _sh(img)
+        except Exception:
+            pass
+        img.save(out, "JPEG", quality=90, optimize=True, progressive=True)
         log.info("Image slide %d: %s", slide_index, out)
         return out
     except Exception as exc:
@@ -2882,6 +2940,12 @@ def post_to_instagram(image_paths: "list[str] | str", caption: str) -> bool:
 
     jpeg_paths: list[str] = []
     tmp_jpegs:  list[str] = []
+    # Lazy-import sharpen util (lives in create_post; avoid circular at module level)
+    try:
+        from create_post import apply_pre_upload_sharpen as _sharpen  # noqa: PLC0415
+    except Exception:
+        _sharpen = lambda x: x  # type: ignore[assignment]  # noqa: E731
+
     for png_path in image_paths:
         try:
             with _Image.open(png_path) as img:
@@ -2892,7 +2956,9 @@ def post_to_instagram(image_paths: "list[str] | str", caption: str) -> bool:
                     img = img.crop((0, 0, w, max_h))
                 _tmp_fd, _tmp_path = _tmpfile.mkstemp(suffix=".jpg", dir=str(OUTPUT_DIR))
                 import os as _os; _os.close(_tmp_fd)
-                img.convert("RGB").save(_tmp_path, "JPEG", quality=95)
+                out_img = _sharpen(img.convert("RGB"))   # counter IG compression
+                out_img.save(_tmp_path, "JPEG", quality=90,
+                             optimize=True, progressive=True)
                 jpeg_paths.append(_tmp_path)
                 tmp_jpegs.append(_tmp_path)
         except Exception as exc:
@@ -3026,6 +3092,10 @@ def post_story_to_instagram(
 
     # Convert to JPEG (IG Stories require JPEG, not PNG)
     import tempfile as _tmpfile
+    try:
+        from create_post import apply_pre_upload_sharpen as _sharpen_s  # noqa: PLC0415
+    except Exception:
+        _sharpen_s = lambda x: x  # type: ignore[assignment]  # noqa: E731
     tmp_path: "str | None" = None
     try:
         with Image.open(story_image_path) as _img:
@@ -3034,7 +3104,9 @@ def post_story_to_instagram(
             if sh > ideal_h + 10:
                 _img = _img.crop((0, 0, sw, ideal_h))
             _, tmp_path = _tmpfile.mkstemp(suffix=".jpg", dir=str(OUTPUT_DIR))
-            _img.convert("RGB").save(tmp_path, "JPEG", quality=95)
+            _sharpen_s(_img.convert("RGB")).save(
+                tmp_path, "JPEG", quality=90, optimize=True, progressive=True,
+            )
     except Exception as exc:
         log.warning("Story JPEG conversion failed: %s", exc)
         if tmp_path:

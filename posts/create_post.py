@@ -26,6 +26,12 @@ except ImportError:
     subprocess.run([sys.executable, "-m", "pip", "install", "Pillow"], check=True)
     from PIL import Image, ImageChops, ImageDraw, ImageFont, ImageEnhance, ImageFilter
 
+# Pillow ≥9.1 renamed the resampling enum; support both.
+try:
+    _LANCZOS = Image.Resampling.LANCZOS
+except AttributeError:
+    _LANCZOS = Image.LANCZOS   # type: ignore[attr-defined]
+
 SCRIPT_DIR = Path(__file__).parent
 OUT_DIR    = SCRIPT_DIR / "output"
 FONT_DIR   = SCRIPT_DIR / "fonts"
@@ -431,6 +437,32 @@ def validate_no_black_boxes(img: Image.Image) -> tuple[bool, list[dict]]:
 
 
 # ---------------------------------------------------------------------------
+# Pre-upload sharpening
+# ---------------------------------------------------------------------------
+
+def apply_pre_upload_sharpen(
+    image: "Image.Image",
+    radius: float = 1.5,
+    percent: int = 50,
+    threshold: int = 3,
+) -> "Image.Image":
+    """
+    Subtle unsharp mask to counter Instagram's aggressive re-encoding softness.
+
+    Params (tune if needed):
+      radius    1.5  — breadth of sharpening (pixels). 1.0 = tight, 2.0 = broad.
+      percent   50   — strength. 30 = very subtle, 70 = punchy (max before halos).
+      threshold  3   — min brightness delta to sharpen; ignores flat noise.
+
+    If output looks over-sharpened (halos on text edges): drop percent to 30.
+    If still soft after IG upload: raise percent to 70, keep radius at 1.5.
+    """
+    return image.filter(ImageFilter.UnsharpMask(
+        radius=radius, percent=percent, threshold=threshold,
+    ))
+
+
+# ---------------------------------------------------------------------------
 # Main card generator
 # ---------------------------------------------------------------------------
 
@@ -655,6 +687,7 @@ def create_post(
 
     # ── SAVE ──────────────────────────────────────────────────────────────────
     result = canvas.convert("RGB")
+    result = apply_pre_upload_sharpen(result)   # counter IG compression softening
     if not output_path:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_path = str(OUT_DIR / f"post_{ts}.png")
