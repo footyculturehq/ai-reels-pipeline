@@ -984,6 +984,42 @@ def inject_hype(headline: str, category: str) -> str:
     return f"{options[idx]} {headline}"
 
 
+# Verbose suffixes to strip from on-card headlines.
+# These add SEO value to article titles but look cramped on a magazine card.
+# The full title is kept in the caption where it has room.
+_CARD_STRIP_RE = re.compile(
+    r"\s*[-–—]\s*("
+    r"launch\s+image|official\s+(look|launch|reveal|confirm\w*)"
+    r"|first[\s-]?official|exclusive\s+(look|images?)"
+    r"|\d{1,2}\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*\s+release"
+    r"|\d{4}[-/]\d{2}[-/]\d{2}"   # ISO dates
+    r"|no\s+more\s+\w+"
+    r"|only\s+available\s+\w+"
+    r"|new\s+(main|back|front)\s+\w+"
+    r"|official\s+images?"
+    r"|comes\s+with\s+\w+"
+    r")",
+    re.IGNORECASE,
+)
+_CARD_MAX_CHARS = 44   # hard cap — keeps the headline to ≤ 2 big lines
+
+
+def trim_headline_for_card(headline: str) -> str:
+    """Strip verbose release-date / image-detail suffixes for on-card display.
+
+    Examples:
+      'Arsenal 26-27 Home Kit Leaked - Launch Image - 15 May Release'
+        → 'Arsenal 26-27 Home Kit Leaked'
+      'Adidas Man Utd 4th Kit Revealed - Official Look - New Main Sponsor'
+        → 'Adidas Man Utd 4th Kit Revealed'
+    """
+    h = _CARD_STRIP_RE.sub("", headline).strip(" -–—")
+    # Hard-truncate on word boundary
+    if len(h) > _CARD_MAX_CHARS:
+        h = h[:_CARD_MAX_CHARS].rsplit(" ", 1)[0].strip(" -–—")
+    return h or headline   # fallback to original if we stripped everything
+
+
 # ---------------------------------------------------------------------------
 # 4. Build Instagram caption (spec format)
 # ---------------------------------------------------------------------------
@@ -1057,6 +1093,212 @@ def _build_context_sentence(title: str, category: str, article_url: str = None) 
     return " ".join(parts)
 
 
+# ---------------------------------------------------------------------------
+# Instagram @mention lookup  (clubs, brands, players)
+# Keys are lowercase substrings to match against the title.
+# Values are the real IG handle (no @).
+# ---------------------------------------------------------------------------
+
+_IG_HANDLES: dict[str, str] = {
+    # ── Kit / boot brands ────────────────────────────────────────────────────
+    "nike":             "nike",
+    "adidas":           "adidas",
+    "puma":             "puma",
+    "new balance":      "newbalance",
+    "umbro":            "umbro",
+    "under armour":     "underarmour",
+    "castore":          "castore",
+    "hummel":           "hummel",
+    "macron":           "macron",
+    "mizuno":           "mizunofootball",
+    "kappa":            "kappa",
+    "joma":             "jomasport",
+    "erreà":            "erreafootball",
+    # ── Major clubs ──────────────────────────────────────────────────────────
+    "arsenal":          "arsenal",
+    "liverpool":        "liverpoolfc",
+    "chelsea":          "chelseafc",
+    "manchester united": "manchesterunited",
+    "man utd":          "manchesterunited",
+    "manchester city":  "mancity",
+    "man city":         "mancity",
+    "real madrid":      "realmadrid",
+    "barcelona":        "fcbarcelona",
+    "psg":              "psg",
+    "juventus":         "juventusfc",
+    "bayern":           "fcbayern",
+    "inter milan":      "inter",
+    "ac milan":         "acmilan",
+    "tottenham":        "spursofficial",
+    "dortmund":         "bvb09",
+    "napoli":           "officialsscnapoli",
+    "ajax":             "afcajax",
+    "atletico":         "atleticodemadrid",
+    "rangers":          "rangersfc",
+    "flamengo":         "flamengo",
+    "newcastle":        "nufc",
+    "borussia":         "bvb09",
+    "gladbach":         "borussia",
+    "porto":            "fcporto",
+    "benfica":          "slbenfica",
+    "sevilla":          "sevillafc",
+    "villarreal":       "villarrealcf",
+    "wolves":           "wolves",
+    "west ham":         "westham",
+    "aston villa":      "avfcofficial",
+    "celtic":           "celticfc",
+    # ── Players ──────────────────────────────────────────────────────────────
+    "mbappe":           "k.mbappe",
+    "mbappé":           "k.mbappe",
+    "messi":            "leomessi",
+    "ronaldo":          "cristiano",
+    "haaland":          "erling.haaland",
+    "bellingham":       "judebellingham",
+    "vinicius":         "vinijr",
+    "vinícius":         "vinijr",
+    "salah":            "mosalah",
+    "saka":             "bukayosaka",
+    "kane":             "harrykane",
+    "yamal":            "laminyamal",
+    "pedri":            "pedri",
+    "neymar":           "neymarjr",
+    "rashford":         "marcusrashford",
+    "de bruyne":        "kevindebruyne",
+    "griezmann":        "antogriezmann",
+    "lewandowski":      "_rl9",
+    "benzema":          "karimbenzema",
+    "pogba":            "paulpogba",
+    "modric":           "lukamodric10",
+    "alisson":          "alissonbecker",
+    "van dijk":         "virgilvandijk",
+    "trent":            "trentarnold66",
+    "pulisic":          "cpulisic10",
+    "martinelli":       "gabriel.martinelli",
+    "odegaard":         "martinstromjodegaard",
+    "rice":             "declanrice",
+    "havertz":          "kaihavertz29",
+}
+
+# Club → kit manufacturer (used to fill a @mention when only club is detected —
+# the kit brand IS in the post because it's printed on the jersey).
+_CLUB_KIT_BRAND: dict[str, str] = {
+    "arsenal":          "adidas",
+    "manchester united": "adidas",
+    "man utd":          "adidas",
+    "juventus":         "adidas",
+    "real madrid":      "adidas",
+    "bayern":           "adidas",
+    "flamengo":         "adidas",
+    "ajax":             "adidas",
+    "benfica":          "adidas",
+    "liverpool":        "nike",
+    "chelsea":          "nike",
+    "barcelona":        "nike",
+    "psg":              "nike",
+    "tottenham":        "nike",
+    "inter milan":      "nike",
+    "atletico":         "nike",
+    "manchester city":  "puma",
+    "man city":         "puma",
+    "ac milan":         "puma",
+    "dortmund":         "puma",
+    "newcastle":        "castore",
+    "rangers":          "castore",
+    "celtic":           "adidas",
+    "napoli":           "adidas",
+    "wolves":           "adidas",
+    "west ham":         "umbro",
+    "aston villa":      "adidas",
+}
+
+# Club → their current marquee players (featured in kit reveals / promos).
+# Used as a 3rd @mention when club is in the post but no player is named in title.
+# Keep to players who are actually at these clubs as of 2025-26 season.
+_CLUB_STAR_PLAYERS: dict[str, list[str]] = {
+    "arsenal":          ["bukayosaka", "martinelli", "rice"],
+    "liverpool":        ["mosalah", "trentarnold66"],
+    "chelsea":          ["cpulisic10"],
+    "manchester united": ["marcusrashford"],
+    "manchester city":  ["erling.haaland", "kevindebruyne"],
+    "real madrid":      ["k.mbappe", "vinijr", "judebellingham"],
+    "barcelona":        ["laminyamal", "pedri"],
+    "psg":              ["neymarjr"],
+    "juventus":         ["pogba"],
+    "bayern":           ["_rl9"],
+    "inter milan":      [],
+    "ac milan":         [],
+    "tottenham":        [],
+    "dortmund":         [],
+    "napoli":           [],
+    "atletico":         ["antogriezmann"],
+}
+
+
+def _extract_ig_mentions(title: str, category: str,
+                          min_count: int = 3) -> list[str]:
+    """
+    Detect Instagram @handles for entities that are genuinely in the post.
+
+    Strategy:
+      1. Scan title against _IG_HANDLES (brands, clubs, players).
+      2. If a club is found but its kit brand isn't already tagged, add the
+         brand via _CLUB_KIT_BRAND — it IS in the post (on the kit/boot).
+      3. If still < min_count, pad with the content-type leader brand
+         (@nike / @adidas) that is most relevant to the category.
+
+    Returns a deduped list of handles (without the @ sign).
+    """
+    t = title.lower()
+    found: list[str] = []
+    seen: set[str]   = set()
+
+    def _add(handle: str) -> None:
+        if handle and handle not in seen:
+            seen.add(handle)
+            found.append(handle)
+
+    # Pass 1: direct entity scan
+    detected_clubs: list[str] = []
+    for keyword, handle in _IG_HANDLES.items():
+        if keyword in t:
+            _add(handle)
+            # Track club keywords for brand-fill step
+            if keyword in _CLUB_KIT_BRAND:
+                detected_clubs.append(keyword)
+
+    # Pass 2: fill via club→brand mapping (kit brand IS in the post — on the jersey)
+    for club in detected_clubs:
+        brand_kw = _CLUB_KIT_BRAND.get(club)
+        if brand_kw:
+            brand_handle = _IG_HANDLES.get(brand_kw)
+            if brand_handle:
+                _add(brand_handle)
+
+    # Pass 3: still under min_count — try club star players (they're in kit reveals)
+    if len(found) < min_count:
+        for club in detected_clubs:
+            for player_kw in _CLUB_STAR_PLAYERS.get(club, []):
+                if len(found) >= min_count:
+                    break
+                _add(player_kw)   # these are already raw handles, not keywords
+            if len(found) >= min_count:
+                break
+
+    # Pass 4: last resort — category-relevant brand leaders (safe, football-relevant)
+    if len(found) < min_count:
+        fallbacks = (
+            ["adidas", "nike", "puma"]
+            if category.upper() in ("KIT DROP", "LEAKED", "VAULT")
+            else ["nike", "adidas", "puma"]
+        )
+        for fb in fallbacks:
+            if len(found) >= min_count:
+                break
+            _add(_IG_HANDLES[fb])
+
+    return found[:8]   # cap at 8 to keep caption clean
+
+
 def build_caption(title: str, category: str, article_url: str = None) -> str:
     """
     Format per spec:
@@ -1064,9 +1306,11 @@ def build_caption(title: str, category: str, article_url: str = None) -> str:
       Line 2: blank
       Line 3: 1–2 sentence context (entity-aware)
       Line 4: blank
-      Line 5: CTA
+      Line 5: @mentions (≥3 entities actually in the post)
       Line 6: blank
-      Line 7: Hashtags (max 8)
+      Line 7: CTA
+      Line 8: blank
+      Line 9: Hashtags (max 20)
     """
     t = title.lower()
 
@@ -1076,7 +1320,11 @@ def build_caption(title: str, category: str, article_url: str = None) -> str:
     # ── Line 3: context ───────────────────────────────────────────────────────
     context = _build_context_sentence(title, category, article_url)
 
-    # ── Line 5: CTA ───────────────────────────────────────────────────────────
+    # ── Line 5: @mentions (≥3 entities actually in the post) ─────────────────
+    mention_handles = _extract_ig_mentions(title, category, min_count=3)
+    mention_line    = " ".join(f"@{h}" for h in mention_handles)
+
+    # ── Line 7: CTA ───────────────────────────────────────────────────────────
     cta = "🔔 Drop alerts → link in bio"
 
     # ── Line 7: Hashtags (max 8, relevant only) ───────────────────────────────
@@ -1181,6 +1429,7 @@ def build_caption(title: str, category: str, article_url: str = None) -> str:
     return (
         f"{headline_line}\n\n"
         f"{context}\n\n"
+        f"{mention_line}\n\n"
         f"{cta}\n\n"
         f"{tag_block}"
     )
@@ -1289,8 +1538,8 @@ _VREJECT = "REJECT"
 _VMANUAL = "MANUAL"
 
 # Minimum source resolution (checked AFTER any crop)
-_MIN_SRC_W = 900    # at least 900px wide so 1080px output isn't upscaled
-_MIN_SRC_H = 600    # at least 600px tall (Twitter Cards are 1200×630 — valid)
+_MIN_SRC_W = 750    # footyheadlines blogspot CDN serves og:images at 800px; 750→1080 is ~1.4x upscale (acceptable)
+_MIN_SRC_H = 500    # at least 500px tall (Twitter Cards are 1200×630 — valid)
 
 # Known competitor/site watermarks to reject
 _KNOWN_WATERMARKS = [
@@ -1488,17 +1737,29 @@ def validate_image(
         # Approved source with person → allow, but log
         log.debug("Person in approved-source image (skin=%.0f%%): %s", skin * 100, img_url[:60])
 
-    # ── Rule 4: Watermark detection ───────────────────────────────────────────
-    wm = _detect_watermark(img)
-    if wm:
-        # body-watermark-top = corner URL stamp (e.g. "FOOTYHEADLINES.COM" top-left).
-        # The renderer already trims the top 9% of the photo, which removes it cleanly.
-        # allow_top_watermark lets kit og:images through so we can still post.
-        # body-watermark-mid = diagonal tiling across the whole image — always reject.
-        if wm == "body-watermark-top" and allow_top_watermark:
-            log.info("Allowing top-corner watermark (renderer will trim top 9%%): %s", img_url[:80])
+    # ── Rule 4: Watermark detection (rotation-aware OCR + structural) ────────
+    try:
+        sys.path.insert(0, str(SCRIPT_DIR))
+        from watermark_detector import detect_watermarks as _detect_wm  # noqa: PLC0415
+        wm_result = _detect_wm(img)
+        wm_sev    = wm_result.get("severity", "none")
+    except Exception as _wm_exc:
+        log.debug("watermark_detector unavailable (%s) — using legacy heuristic", _wm_exc)
+        # Legacy fallback
+        _legacy = _detect_watermark(img)
+        wm_sev  = ("product_overlap" if _legacy == "body-watermark-mid"
+                   else "corner_only"  if _legacy == "body-watermark-top"
+                   else "none")
+
+    if wm_sev in ("product_overlap", "body"):
+        return _VREJECT, f"Watermark severity '{wm_sev}' — body/diagonal stamp unusable", None
+
+    if wm_sev == "corner_only":
+        if allow_top_watermark:
+            # Caller confirms the renderer will crop the top corner (9% trim)
+            log.info("Corner watermark allowed (renderer trims top 9%%): %s", img_url[:80])
         else:
-            return _VREJECT, f"Watermark detected ({wm}) — source a cleaner image", None
+            return _VREJECT, f"Corner watermark detected — use allow_top_watermark=True if renderer crops it", None
 
     # ── Rule 7: Final aspect ratio sanity check ───────────────────────────────
     # Accept anything from very tall portrait to wide landscape (2.5:1).
@@ -2855,7 +3116,7 @@ def main() -> None:
         log.info("FORCE URL mode: %s  title=%r  dry_run=%s", force_url, force_title, dry_run)
         category       = pick_category(force_title)
         raw_headline   = format_headline(force_title)
-        hype_headline  = inject_hype(raw_headline, category)
+        hype_headline  = inject_hype(trim_headline_for_card(raw_headline), category)
         caption        = build_caption(force_title, category, article_url=force_url)
         log.info("Category: %s  Headline: %r", category, hype_headline)
         images_bytes   = find_images(force_title, article_url=force_url, n=3)
@@ -2999,7 +3260,7 @@ def main() -> None:
         )
         _cat          = pick_category(cand["title"])
         _raw          = format_headline(cand["title"])
-        _hype         = inject_hype(_raw, _cat)
+        _hype         = inject_hype(trim_headline_for_card(_raw), _cat)
         _caption      = build_caption(cand["title"], _cat, article_url=cand.get("url"))
         _preferred    = cand.get("tweet_image")
         _imgs         = find_images(

@@ -1,0 +1,18 @@
+REEL ID: reel-001
+ANGLE: Profit breakdown / market education
+HOOK: Real numbers to grab attention immediately
+
+---
+
+SCRIPT (target: ~35 seconds):
+
+"Most people have no idea football boots are being flipped for profit every single week. Here's how it actually works. Someone buys a limited Adidas Predator Elite at retail — let's say £200. Two weeks later, it's listed on StockX for £310. After fees, that's a clean £80 profit in 14 days. The reason it works is simple: Nike, Adidas, and Mizuno release limited colourways in batches of under 500 pairs. They sell out in under 20 minutes. Demand stays high. Supply doesn't come back. That gap is where the profit lives. And right now the market is moving fast — boots we tracked this week are already up 25 to 40 percent. This is exactly what we break down inside Footy Culture HQ every single week. Link in bio."
+
+---
+
+NOTES:
+- Script is ~35 seconds at normal pace, ~32s at 1.1x speed
+- Hook lands in first 3 words: "Most people have"
+- Real numbers throughout (£200, £310, £80, 500 pairs, 20 minutes, 25-40%)
+- CTA at end: link in bio
+- reel-id for pipeline: reel-001

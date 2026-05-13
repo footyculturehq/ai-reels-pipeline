@@ -36,11 +36,12 @@ PITCH_BLACK = (0,   0,   0)
 # Instagram 4:5 portrait
 SIZES = {"portrait": (1080, 1350), "square": (1080, 1080)}
 
-# Bottom gradient: starts at 40% down, max 80% opacity
-# Power 2.5 (ease-in) = nearly invisible until ~65% down → no visible band edge.
+# Bottom gradient: starts at 40% down, 50% max opacity, cubic ease-in.
+# Nearly invisible until ~75% down — subtle safety-net for light products
+# so white headline text always has minimum contrast without a heavy band.
 GRADIENT_START_FRAC = 0.40
-OVERLAY_MAX_ALPHA   = int(255 * 0.80)
-GRADIENT_POWER      = 2.5
+OVERLAY_MAX_ALPHA   = int(255 * 0.50)   # 50% max — understated on dark kits
+GRADIENT_POWER      = 3.0               # cubic (was 2.5) — later, softer onset
 
 # Top vignette: short semi-transparent fade just for wordmark legibility
 TOP_VIGN_H     = 110          # gradient covers top 110px
@@ -172,6 +173,35 @@ def _wrap_headline(draw, text: str, max_w: int, max_lines: int = 2
     if cur:
         lines.append(cur)
     return lines[:3], font
+
+
+# ---------------------------------------------------------------------------
+# Hook-prefix splitter
+# ---------------------------------------------------------------------------
+
+# Known hype prefixes that should render as their own smaller visual beat
+# above the main headline body.
+_HOOK_PREFIXES = (
+    "JUST IN:", "BREAKING:", "LEAKED:", "OFFICIAL:", "EXCLUSIVE:",
+    "FIRST LOOK:", "SPOTTED:", "DROPPED:", "REVEALED:", "CONFIRMED:",
+    "CAUGHT:", "ON FEET:", "TRAINING GROUND:", "MASSIVE:", "VAULT:",
+    "BACK:", "LATEST:",
+    # variants without colon (ICONIC., CLASSIC.)
+    "ICONIC.", "CLASSIC.",
+)
+
+
+def _split_hook_prefix(headline: str) -> tuple[str, str]:
+    """Split 'JUST IN: Arsenal...' → ('JUST IN:', 'Arsenal...').
+
+    Returns ('', headline) when no known prefix is found.
+    """
+    up = headline.strip().upper()
+    for p in _HOOK_PREFIXES:
+        if up.startswith(p):
+            rest = headline[len(p):].strip()
+            return p, rest
+    return "", headline
 
 
 # ---------------------------------------------------------------------------
@@ -467,7 +497,10 @@ def create_post(
             photo = photo.resize((nw, nh), Image.LANCZOS)
             ox    = (nw - W) // 2
             focal = (focal_point or "center").lower()
-            oy    = 0 if focal == "top" else (nh - H if focal == "bottom" else (nh - H) // 2)
+            # For "center": shift crop 7% toward the top (upper-third editorial feel).
+            # 0.43 of slack instead of 0.50 = subjects land in upper third, not dead centre.
+            oy    = 0 if focal == "top" else (nh - H if focal == "bottom"
+                    else max(0, int((nh - H) * 0.43)))
             photo = photo.crop((ox, oy, ox + W, oy + H))
             canvas.paste(photo.convert("RGBA"), (0, 0))
     else:
@@ -538,10 +571,20 @@ def create_post(
     draw = ImageDraw.Draw(canvas)
 
     # ── MEASURE HEADLINE ──────────────────────────────────────────────────────
-    max_tw   = W - pad_x * 2
-    hl_lines, hl_font = _wrap_headline(draw, headline, max_tw)
+    max_tw = W - pad_x * 2
+
+    # Split "JUST IN:" / "BREAKING:" etc. into a separate smaller prefix line
+    hook_prefix, hl_body = _split_hook_prefix(headline)
+    body_text            = hl_body if hook_prefix else headline
+
+    hl_lines, hl_font = _wrap_headline(draw, body_text, max_tw)
     hl_size  = hl_font.size
     line_h   = int(hl_size * 0.94)   # tight line-height
+
+    # Prefix line: ~52% of body size, white 75% opacity — reads as own beat
+    pfx_font   = _font(max(40, int(hl_size * 0.52)), "headline") if hook_prefix else None
+    pfx_line_h = int(pfx_font.size * 1.10) if pfx_font else 0
+    pfx_gap    = 4    # small gap between prefix and body headline
 
     # ── CATEGORY TAG ─────────────────────────────────────────────────────────
     cat_label  = CATEGORY_LABELS.get(category.upper(), category.upper())
@@ -560,15 +603,19 @@ def create_post(
     hdl_th   = _th(draw, hdl_text, hdl_font)
 
     # ── LAYOUT: anchor to bottom, stack upward ────────────────────────────────
-    bottom_pad = 100          # extra breathing room above the bottom edge
-    gap_hl_tag = 20           # gap between tag bottom and headline top
-    gap_hl_hdl = 28           # gap between headline bottom and handle
-    hl_block_h = len(hl_lines) * line_h
+    # Stack order from bottom: handle → body headline → [prefix] → category tag
+    bottom_pad = 100      # breathing room above bottom edge
+    gap_hl_tag = 20       # gap between tag bottom and text block top
+    gap_hl_hdl = 28       # gap between body bottom and handle
+
+    hl_block_h     = len(hl_lines) * line_h
+    prefix_block_h = (pfx_line_h + pfx_gap) if hook_prefix else 0
 
     hdl_y      = H - bottom_pad - hdl_th
     hl_end_y   = hdl_y - gap_hl_hdl
-    hl_start_y = hl_end_y - hl_block_h
-    tag_y      = hl_start_y - gap_hl_tag - tag_box_h
+    hl_start_y = hl_end_y - hl_block_h          # body starts here
+    pfx_y      = hl_start_y - pfx_gap - pfx_line_h   # prefix sits above body
+    tag_y      = (pfx_y if hook_prefix else hl_start_y) - gap_hl_tag - tag_box_h
 
     # ── DRAW CATEGORY TAG — SOLID WHITE BOX, BLACK TEXT (premium) ────────────
     draw.rectangle(
@@ -581,7 +628,18 @@ def create_post(
         cat_label, font=tag_font, fill=PITCH_BLACK,
     )
 
-    # ── DRAW HEADLINE (white, ALL CAPS, tight line-height) ────────────────────
+    # ── DRAW PREFIX LINE — smaller, slightly dimmer (own visual beat) ─────────
+    if hook_prefix and pfx_font:
+        pfx_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        pfx_draw  = ImageDraw.Draw(pfx_layer)
+        pfx_draw.text(
+            (pad_x, pfx_y), hook_prefix.upper(), font=pfx_font,
+            fill=(255, 255, 255, 191),   # white 75% — slightly dimmer than body
+        )
+        canvas = Image.alpha_composite(canvas, pfx_layer)
+        draw   = ImageDraw.Draw(canvas)
+
+    # ── DRAW HEADLINE BODY (white, ALL CAPS, tight line-height) ──────────────
     cur_y = hl_start_y
     for line in hl_lines:
         draw.text((pad_x, cur_y), line, font=hl_font, fill=WHITE)

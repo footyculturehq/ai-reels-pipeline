@@ -1,0 +1,24 @@
+{
+  "name": "ai-reels-pipeline",
+  "version": "1.0.0",
+  "description": "Automated Instagram Reels pipeline with AI avatar, Veo B-roll, and Remotion rendering",
+  "scripts": {
+    "studio": "remotion studio",
+    "render": "remotion render DynamicReel"
+  },
+  "dependencies": {
+    "@remotion/cli": "4.0.428",
+    "@remotion/google-fonts": "4.0.428",
+    "@remotion/media": "4.0.428",
+    "@remotion/transitions": "4.0.428",
+    "remotion": "4.0.428"
+  },
+  "devDependencies": {
+    "@types/react": "^18.0.0",
+    "@types/react-dom": "^18.0.0",
+    "typescript": "5.9.3"
+  },
+  "remotion": {
+    "entryPoint": "src/Root.tsx"
+  }
+}

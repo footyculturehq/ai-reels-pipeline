@@ -1,0 +1,20 @@
+{
+  "api_key": "YOUR_HEYGEN_API_KEY",
+  "avatars": {
+    "my_avatar": "YOUR_AVATAR_ID"
+  },
+  "voices": {
+    "my_voice": "YOUR_VOICE_ID"
+  },
+  "profiles": {
+    "default": {
+      "avatar_id": "YOUR_AVATAR_ID",
+      "avatar_name": "My Avatar",
+      "voice_id": "YOUR_VOICE_ID",
+      "voice_name": "My Voice",
+      "voice_emotion": "Excited",
+      "voice_speed": 1.0,
+      "notes": "Primary avatar profile"
+    }
+  }
+}

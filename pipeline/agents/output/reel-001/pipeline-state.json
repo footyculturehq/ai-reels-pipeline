@@ -1,0 +1,56 @@
+{
+  "reel_id": "reel-001",
+  "created": "2026-05-03T17:00:02.145596+00:00",
+  "updated": "2026-05-03T17:06:34.027062+00:00",
+  "tool_name": "Footy Culture HQ",
+  "transcript_path": "public/avatars/avatar-reel-001-fast_transcript.json",
+  "avatar_src": "avatars/avatar-reel-001-fast.mp4",
+  "script": "Most people have no idea football boots are being flipped for profit every single week. Here's how it actually works. Someone buys a limited Adidas Predator Elite at retail \u2014 let's say \u00a3200. Two weeks later, it's listed on StockX for \u00a3310. After fees, that's a clean \u00a380 profit in 14 days. The reason it works is simple: Nike, Adidas, and Mizuno release limited colourways in batches of under 500 pairs. They sell out in under 20 minutes. Demand stays high. Supply doesn't come back. That gap is where the profit lives. And right now the market is moving fast \u2014 boots we tracked this week are already up 25 to 40 percent. This is exactly what we break down inside Footy Culture HQ every single week. Link in bio.",
+  "product_url": "",
+  "speed_factor": 1.1,
+  "stages": {
+    "curate": {
+      "status": "complete",
+      "output_path": "C:/Users/kaima/Desktop/Claud Workspace/ai-reels-pipeline/pipeline/agents/output/reel-001/asset-manifest.json",
+      "summary": {
+        "total": 0,
+        "approved": 0
+      }
+    },
+    "storyboard": {
+      "status": "complete",
+      "output_path": "C:/Users/kaima/Desktop/Claud Workspace/ai-reels-pipeline/pipeline/agents/output/reel-001/storyboard.json",
+      "summary": {
+        "segments": 12,
+        "pexels_needed": 12,
+        "image_needed": 0,
+        "duration": 50.7
+      }
+    },
+    "veo": {
+      "status": "completed",
+      "completed_at": "2026-05-03T17:03:38.772014+00:00",
+      "output_path": "C:\\Users\\kaima\\Desktop\\Claud Workspace\\ai-reels-pipeline\\pipeline\\agents\\output\\reel-001\\storyboard.json",
+      "summary": {
+        "downloaded": 12,
+        "failed": 0
+      }
+    },
+    "assemble": {
+      "status": "completed",
+      "completed_at": "2026-05-03T17:06:34.027047+00:00",
+      "output_path": "C:\\Users\\kaima\\Desktop\\Claud Workspace\\ai-reels-pipeline\\pipeline\\agents\\output\\reel-001\\reel-config-reel-001.json",
+      "summary": {
+        "segments": 12,
+        "captions": 58,
+        "duration_frames": 1268,
+        "rendered": "C:\\Users\\kaima\\Desktop\\Claud Workspace\\ai-reels-pipeline\\out\\reel-001.mp4"
+      }
+    },
+    "review": {
+      "status": "pending"
+    }
+  },
+  "iteration": 1,
+  "history": []
+}

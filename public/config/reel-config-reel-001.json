@@ -1,0 +1,404 @@
+{
+  "id": "reel-001",
+  "duration": 1233,
+  "avatarSrc": "avatars/avatar-reel-001-v2-fast.mp4",
+  "avatarMarginTop": -280,
+  "crossfadeFrames": 5,
+  "brollSegments": [
+    {
+      "startSec": 0.0,
+      "endSec": 4.2,
+      "objectPosition": "center center",
+      "scaleFrom": 1.0,
+      "scaleTo": 1.06,
+      "_speech": "Most people have no idea football boots are being flipped for profit every single week.",
+      "image": "topics/reel-001/boot-closeup.jpg"
+    },
+    {
+      "startSec": 4.2,
+      "endSec": 8.5,
+      "objectPosition": "center center",
+      "scaleFrom": 1.0,
+      "scaleTo": 1.08,
+      "_speech": "Here's how it actually works. Someone buys a limited Adidas Predator Elite at retail",
+      "image": "topics/reel-001/predator-boot.jpg"
+    },
+    {
+      "startSec": 8.5,
+      "endSec": 13.0,
+      "objectPosition": "center center",
+      "scaleFrom": 1.0,
+      "scaleTo": 1.05,
+      "_speech": "let's say \u00c2\u00a3200. Two weeks later, it's listed on StockX for \u00c2\u00a3310. After fees, that's a clean \u00c2\u00a380 profit in 14 days.",
+      "image": "topics/reel-001/cash-profit.jpg"
+    },
+    {
+      "startSec": 13.0,
+      "endSec": 17.5,
+      "objectPosition": "center center",
+      "scaleFrom": 1.0,
+      "scaleTo": 1.08,
+      "_speech": "The reason it works is simple: Nike, Adidas, and Mizuno release limited colourways",
+      "image": "topics/reel-001/limited-boot.jpg"
+    },
+    {
+      "startSec": 17.5,
+      "endSec": 21.0,
+      "objectPosition": "center center",
+      "scaleFrom": 1.0,
+      "scaleTo": 1.06,
+      "_speech": "in batches of under 500 pairs. They sell out in under 20 minutes.",
+      "image": "topics/reel-001/boot-shelf.jpg"
+    },
+    {
+      "startSec": 21.0,
+      "endSec": 25.5,
+      "objectPosition": "center 60%",
+      "scaleFrom": 1.0,
+      "scaleTo": 1.08,
+      "_speech": "Demand stays high. Supply doesn't come back.",
+      "image": "topics/reel-001/player-feet.jpg"
+    },
+    {
+      "startSec": 25.5,
+      "endSec": 30.0,
+      "objectPosition": "center center",
+      "scaleFrom": 1.0,
+      "scaleTo": 1.06,
+      "_speech": "That gap is where the profit lives.",
+      "image": "topics/reel-001/money-stack.jpg"
+    },
+    {
+      "startSec": 30.0,
+      "endSec": 34.5,
+      "objectPosition": "center center",
+      "scaleFrom": 1.0,
+      "scaleTo": 1.08,
+      "_speech": "And right now the market is moving fast \u00e2\u20ac\u201d boots we tracked this week are already up 25 to 40 percent.",
+      "image": "topics/reel-001/mercurial-boot.jpg"
+    },
+    {
+      "startSec": 34.5,
+      "endSec": 38.5,
+      "objectPosition": "center center",
+      "scaleFrom": 1.0,
+      "scaleTo": 1.06,
+      "_speech": "This is exactly what we break down inside Footy Culture HQ",
+      "image": "topics/reel-001/new-boot-release.jpg"
+    },
+    {
+      "startSec": 38.5,
+      "endSec": 43.0,
+      "objectPosition": "center center",
+      "scaleFrom": 1.0,
+      "scaleTo": 1.08,
+      "_speech": "every single week.",
+      "image": "topics/reel-001/resell-profit.jpg"
+    },
+    {
+      "startSec": 43.0,
+      "endSec": 47.0,
+      "objectPosition": "center center",
+      "scaleFrom": 1.0,
+      "scaleTo": 1.05,
+      "_speech": "Link in bio.",
+      "image": "topics/reel-001/phone-screen.jpg"
+    },
+    {
+      "startSec": 47.0,
+      "endSec": 49.32,
+      "objectPosition": "center center",
+      "scaleFrom": 1.0,
+      "scaleTo": 1.08,
+      "image": "topics/reel-001/boot-grass-action.jpg"
+    }
+  ],
+  "captionChunks": [
+    {
+      "text": "Most people",
+      "startSec": 0.0,
+      "endSec": 0.68
+    },
+    {
+      "text": "have no idea",
+      "startSec": 0.68,
+      "endSec": 1.44
+    },
+    {
+      "text": "football boots",
+      "startSec": 1.44,
+      "endSec": 2.2
+    },
+    {
+      "text": "are being",
+      "startSec": 2.2,
+      "endSec": 2.54
+    },
+    {
+      "text": "flipped for",
+      "startSec": 2.54,
+      "endSec": 3.02
+    },
+    {
+      "text": "profit every",
+      "startSec": 3.02,
+      "endSec": 3.54
+    },
+    {
+      "text": "single week.",
+      "startSec": 3.54,
+      "endSec": 4.16
+    },
+    {
+      "text": "Here's how it",
+      "startSec": 4.84,
+      "endSec": 5.64
+    },
+    {
+      "text": "actually",
+      "startSec": 5.64,
+      "endSec": 5.92
+    },
+    {
+      "text": "works. Someone",
+      "startSec": 5.92,
+      "endSec": 7.68
+    },
+    {
+      "text": "buys a",
+      "startSec": 7.68,
+      "endSec": 8.14
+    },
+    {
+      "text": "limited",
+      "startSec": 8.14,
+      "endSec": 8.42
+    },
+    {
+      "text": "Adidas Predator",
+      "startSec": 8.42,
+      "endSec": 9.22
+    },
+    {
+      "text": "Elite at",
+      "startSec": 9.22,
+      "endSec": 9.62
+    },
+    {
+      "text": "retail, let's",
+      "startSec": 9.62,
+      "endSec": 10.54
+    },
+    {
+      "text": "say \u00a3200. Two",
+      "startSec": 10.54,
+      "endSec": 12.76
+    },
+    {
+      "text": "weeks later,",
+      "startSec": 12.76,
+      "endSec": 13.38
+    },
+    {
+      "text": "it's listed",
+      "startSec": 13.62,
+      "endSec": 14.0
+    },
+    {
+      "text": "on StockX for",
+      "startSec": 14.0,
+      "endSec": 14.76
+    },
+    {
+      "text": "\u00a3310. After",
+      "startSec": 14.76,
+      "endSec": 17.32
+    },
+    {
+      "text": "fees, that's",
+      "startSec": 17.32,
+      "endSec": 18.14
+    },
+    {
+      "text": "a clean \u00a380",
+      "startSec": 18.14,
+      "endSec": 18.68
+    },
+    {
+      "text": "profit in 14",
+      "startSec": 18.68,
+      "endSec": 19.84
+    },
+    {
+      "text": "days. The",
+      "startSec": 19.84,
+      "endSec": 21.38
+    },
+    {
+      "text": "reason it",
+      "startSec": 21.38,
+      "endSec": 21.8
+    },
+    {
+      "text": "works is",
+      "startSec": 21.8,
+      "endSec": 22.24
+    },
+    {
+      "text": "simple, Nike,",
+      "startSec": 22.24,
+      "endSec": 22.98
+    },
+    {
+      "text": "Adidas and",
+      "startSec": 23.42,
+      "endSec": 24.18
+    },
+    {
+      "text": "Mizuna release",
+      "startSec": 24.18,
+      "endSec": 24.82
+    },
+    {
+      "text": "limited colourways",
+      "startSec": 24.82,
+      "endSec": 25.64
+    },
+    {
+      "text": "in batches of",
+      "startSec": 25.64,
+      "endSec": 26.28
+    },
+    {
+      "text": "under 500",
+      "startSec": 26.28,
+      "endSec": 27.06
+    },
+    {
+      "text": "pairs. They",
+      "startSec": 27.06,
+      "endSec": 28.56
+    },
+    {
+      "text": "sell out in",
+      "startSec": 28.56,
+      "endSec": 29.12
+    },
+    {
+      "text": "under 20",
+      "startSec": 29.12,
+      "endSec": 29.64
+    },
+    {
+      "text": "minutes. Demand",
+      "startSec": 29.64,
+      "endSec": 31.16
+    },
+    {
+      "text": "stays high.",
+      "startSec": 31.16,
+      "endSec": 31.84
+    },
+    {
+      "text": "Supply doesn't",
+      "startSec": 32.7,
+      "endSec": 33.5
+    },
+    {
+      "text": "come back.",
+      "startSec": 33.5,
+      "endSec": 34.0
+    },
+    {
+      "text": "That gap is",
+      "startSec": 34.66,
+      "endSec": 35.38
+    },
+    {
+      "text": "where the",
+      "startSec": 35.38,
+      "endSec": 35.7
+    },
+    {
+      "text": "profit lives.",
+      "startSec": 35.7,
+      "endSec": 36.26
+    },
+    {
+      "text": "And right now",
+      "startSec": 37.22,
+      "endSec": 37.82
+    },
+    {
+      "text": "the market is",
+      "startSec": 37.82,
+      "endSec": 38.42
+    },
+    {
+      "text": "moving fast,",
+      "startSec": 38.42,
+      "endSec": 39.08
+    },
+    {
+      "text": "boots we",
+      "startSec": 39.46,
+      "endSec": 39.76
+    },
+    {
+      "text": "track this",
+      "startSec": 39.76,
+      "endSec": 40.22
+    },
+    {
+      "text": "week are",
+      "startSec": 40.22,
+      "endSec": 40.62
+    },
+    {
+      "text": "already up 25",
+      "startSec": 40.62,
+      "endSec": 41.62
+    },
+    {
+      "text": "to 40%. This",
+      "startSec": 41.62,
+      "endSec": 43.72
+    },
+    {
+      "text": "is exactly",
+      "startSec": 43.72,
+      "endSec": 44.22
+    },
+    {
+      "text": "what we break",
+      "startSec": 44.22,
+      "endSec": 44.78
+    },
+    {
+      "text": "down",
+      "startSec": 44.78,
+      "endSec": 45.02
+    },
+    {
+      "text": "inside FUTICULTURE",
+      "startSec": 45.02,
+      "endSec": 46.26
+    },
+    {
+      "text": "HQ every",
+      "startSec": 46.26,
+      "endSec": 47.06
+    },
+    {
+      "text": "single week.",
+      "startSec": 47.06,
+      "endSec": 47.7
+    },
+    {
+      "text": "Link in bio.",
+      "startSec": 48.56,
+      "endSec": 49.32
+    }
+  ],
+  "scenes": []
+}

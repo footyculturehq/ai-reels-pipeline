@@ -1,0 +1,187 @@
+{
+  "reel_id": "reel-001",
+  "total_duration": 50.7,
+  "segment_count": 13,
+  "segments": [
+    {
+      "type": "video",
+      "asset_path": "clips/pexels-football-boots-collection.mp4",
+      "start": 0.0,
+      "end": 4.2,
+      "label": "Football boots shelf",
+      "framing": {
+        "objectPosition": "center center",
+        "scaleFrom": 1.0,
+        "scaleTo": 1.08,
+        "videoStartSec": 0
+      },
+      "search_query": "football boots collection",
+      "_speech": "Most people have no idea football boots are being flipped for profit every single week."
+    },
+    {
+      "type": "video",
+      "asset_path": "clips/pexels-soccer-cleats-unboxing.mp4",
+      "start": 4.2,
+      "end": 8.5,
+      "label": "Soccer cleats unboxing",
+      "framing": {
+        "objectPosition": "center center",
+        "scaleFrom": 1.05,
+        "scaleTo": 1.0,
+        "videoStartSec": 2
+      },
+      "search_query": "soccer cleats unboxing",
+      "_speech": "Here's how it actually works. Someone buys a limited Adidas Predator Elite at retail"
+    },
+    {
+      "type": "video",
+      "asset_path": "clips/pexels-counting-money-profit.mp4",
+      "start": 8.5,
+      "end": 13.0,
+      "label": "Money profit cash",
+      "framing": {
+        "objectPosition": "center center",
+        "scaleFrom": 1.0,
+        "scaleTo": 1.1,
+        "videoStartSec": 0
+      },
+      "search_query": "counting money profit",
+      "_speech": "let's say \u00c2\u00a3200. Two weeks later, it's listed on StockX for \u00c2\u00a3310. After fees, that's a clean \u00c2\u00a380 profit in 14 days."
+    },
+    {
+      "type": "video",
+      "asset_path": "clips/pexels-limited-edition-sneakers.mp4",
+      "start": 13.0,
+      "end": 17.5,
+      "label": "Limited edition sneakers",
+      "framing": {
+        "objectPosition": "center 30%",
+        "scaleFrom": 1.0,
+        "scaleTo": 1.08,
+        "videoStartSec": 1
+      },
+      "search_query": "limited edition sneakers",
+      "_speech": "The reason it works is simple: Nike, Adidas, and Mizuno release limited colourways"
+    },
+    {
+      "type": "video",
+      "asset_path": "clips/pexels-shoe-store-retail-shelf.mp4",
+      "start": 17.5,
+      "end": 21.0,
+      "label": "Shoe store retail",
+      "framing": {
+        "objectPosition": "center center",
+        "scaleFrom": 1.05,
+        "scaleTo": 1.0,
+        "videoStartSec": 0
+      },
+      "search_query": "shoe store retail shelf",
+      "_speech": "in batches of under 500 pairs. They sell out in under 20 minutes."
+    },
+    {
+      "type": "video",
+      "asset_path": "clips/pexels-football-training-pitch.mp4",
+      "start": 21.0,
+      "end": 25.5,
+      "label": "Football pitch training",
+      "framing": {
+        "objectPosition": "center center",
+        "scaleFrom": 1.0,
+        "scaleTo": 1.1,
+        "videoStartSec": 3
+      },
+      "search_query": "football training pitch",
+      "_speech": "Demand stays high. Supply doesn't come back."
+    },
+    {
+      "type": "video",
+      "asset_path": "clips/pexels-stock-market-price-chart.mp4",
+      "start": 25.5,
+      "end": 30.0,
+      "label": "Market price graph",
+      "framing": {
+        "objectPosition": "center center",
+        "scaleFrom": 1.0,
+        "scaleTo": 1.08,
+        "videoStartSec": 0
+      },
+      "search_query": "stock market price chart",
+      "_speech": "That gap is where the profit lives."
+    },
+    {
+      "type": "video",
+      "asset_path": "clips/pexels-football-boots-close-up.mp4",
+      "start": 30.0,
+      "end": 34.5,
+      "label": "Football boots close-up",
+      "framing": {
+        "objectPosition": "center 40%",
+        "scaleFrom": 1.0,
+        "scaleTo": 1.12,
+        "videoStartSec": 0
+      },
+      "search_query": "football boots close up",
+      "_speech": "And right now the market is moving fast \u00e2\u20ac\u201d boots we tracked this week are already up 25 to 40 percent."
+    },
+    {
+      "type": "video",
+      "asset_path": "clips/pexels-online-shopping-resale.mp4",
+      "start": 34.5,
+      "end": 38.5,
+      "label": "Online resale platform",
+      "framing": {
+        "objectPosition": "center center",
+        "scaleFrom": 1.05,
+        "scaleTo": 1.0,
+        "videoStartSec": 1
+      },
+      "search_query": "online shopping resale",
+      "_speech": "This is exactly what we break down inside Footy Culture HQ"
+    },
+    {
+      "type": "video",
+      "asset_path": "clips/pexels-soccer-player-boots-feet.mp4",
+      "start": 38.5,
+      "end": 43.0,
+      "label": "Soccer player premium boots",
+      "framing": {
+        "objectPosition": "center center",
+        "scaleFrom": 1.0,
+        "scaleTo": 1.08,
+        "videoStartSec": 2
+      },
+      "search_query": "soccer player boots feet",
+      "_speech": "every single week."
+    },
+    {
+      "type": "video",
+      "asset_path": "clips/pexels-phone-notification-alert.mp4",
+      "start": 43.0,
+      "end": 47.0,
+      "label": "Phone notification alert",
+      "framing": {
+        "objectPosition": "center center",
+        "scaleFrom": 1.0,
+        "scaleTo": 1.1,
+        "videoStartSec": 0
+      },
+      "search_query": "phone notification alert",
+      "_speech": "Link in bio."
+    },
+    {
+      "type": "video",
+      "asset_path": "clips/pexels-sneaker-collection-display.mp4",
+      "start": 47.0,
+      "end": 50.7,
+      "label": "Football boots collection end",
+      "framing": {
+        "objectPosition": "center center",
+        "scaleFrom": 1.08,
+        "scaleTo": 1.0,
+        "videoStartSec": 4
+      },
+      "search_query": "sneaker collection display",
+      "_speech": ""
+    }
+  ]
+}

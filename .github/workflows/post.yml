@@ -1,11 +1,9 @@
 name: Post to Instagram
 
 on:
-  # noon and 7pm UTC every day (≈ 8am / 3pm ET) — max 2 posts/day
   schedule:
-    - cron: '0 12,19 * * *'
-  # Allow manual trigger from the Actions tab
-  workflow_dispatch:
+    - cron: '0 12,19 * * *'   # noon + 7pm UTC daily
+  workflow_dispatch:            # manual trigger still available from Actions tab
 
 jobs:
   post:
@@ -27,8 +25,11 @@ jobs:
           python-version: '3.11'
 
       # ── 3. Dependencies ────────────────────────────────────────────────────
-      - name: Install dependencies
-        run: pip install requests beautifulsoup4 Pillow instagrapi feedparser numpy
+      - name: Install Tesseract OCR engine
+        run: sudo apt-get install -y tesseract-ocr
+
+      - name: Install Python dependencies
+        run: pip install requests beautifulsoup4 Pillow instagrapi feedparser numpy pytesseract
 
       # ── 4. Run pipeline ────────────────────────────────────────────────────
       - name: Run pipeline

@@ -1,0 +1,14 @@
+{
+  "sadtalker_dir": "C:/SadTalker",
+  "source_photo": "avatar/photo_cropped.jpg",
+  "voice": "en-GB-RyanNeural",
+  "voices": {
+    "aria_female": "en-US-AriaNeural",
+    "jenny_female": "en-US-JennyNeural",
+    "guy_male": "en-US-GuyNeural",
+    "davis_male": "en-US-DavisNeural",
+    "sonia_uk_female": "en-GB-SoniaNeural",
+    "ryan_uk_male": "en-GB-RyanNeural"
+  },
+  "notes": "Set sadtalker_dir to wherever you cloned SadTalker. source_photo is relative to project root."
+}
