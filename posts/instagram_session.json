@@ -48,5 +48,6 @@
         504
     ],
     "public_transport": "requests",
-    "public_transport_impersonate": "chrome136"
+    "public_transport_impersonate": "chrome136",
+    "tls_verify": true
 }
