@@ -35,6 +35,8 @@
     "country_code": 1,
     "locale": "en_US",
     "timezone_offset": 0,
+    "timezone_name": "GMT",
+    "push_disabled": true,
     "request_timeout": 1,
     "public_request_retries_count": 3,
     "public_request_retries_timeout": 2,
